@@ -61,14 +61,11 @@ def _get_year_month(data):
 
 
 # ── Projects cache ────────────────────────────────────────────────────────────
-# /api/projects parses the (potentially large) Odoo CSV for every tab open. The
-# result only changes when the month is re-downloaded from Odoo, so cache it in
-# memory keyed by (year, month) and invalidate on download.
+# /api/projects parses the (potentially large) Odoo CSV, which only changes when
+# the month is re-downloaded from Odoo. Rather than parse on first request, we
+# build the result eagerly — at worker startup for any CSV already on disk, and
+# again right after each download — keyed by (year, month) in memory.
 _PROJECTS_CACHE = {}
-
-
-def _invalidate_projects_cache(year, month):
-    _PROJECTS_CACHE.pop((str(year), str(month)), None)
 
 
 def _ensure_csv_local(year, month):
@@ -82,6 +79,48 @@ def _ensure_csv_local(year, month):
                 f.write(download_to_bytes(f'Odoo exports/{csv_name}'))
         except Exception:
             pass  # generation modules will raise their own error if file is missing
+
+
+def _build_projects(year, month):
+    """Parse the CSV once and build the combined Peve + Fausto project list."""
+    pd.options.mode.chained_assignment = None
+    _ensure_csv_local(year, month)
+    import generazione_rapportini_peve as gen_a
+    import generazione_rapportini_fausto as gen_f
+    # Parse the CSV once and share the DataFrame between both listings.
+    df_source = gen_a.load_df(EXPORT_PATH, year, month)
+    projects = []
+    for p in gen_a.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
+        projects.append({**p, 'report_type': 'peve'})
+    for p in gen_f.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
+        projects.append({**p, 'report_type': 'fausto'})
+    return projects
+
+
+def _warm_projects_cache(year, month):
+    """Eagerly (re)build and store the projects list for a month, swallowing
+    errors so a bad/missing CSV never crashes startup or a download."""
+    try:
+        _PROJECTS_CACHE[(str(year), str(month))] = _build_projects(year, month)
+    except Exception:
+        _PROJECTS_CACHE.pop((str(year), str(month)), None)
+
+
+def _warm_all_local_months():
+    """At worker boot, eagerly build the cache for every month whose CSV is
+    already present on local disk."""
+    try:
+        names = os.listdir(EXPORT_PATH)
+    except OSError:
+        return  # EXPORT_PATH doesn't exist yet (e.g. cold start on Render)
+    pat = re.compile(r'^(\d{4})_(\d{1,2})_timesheets_extraction\.csv$')
+    for name in names:
+        m = pat.match(name)
+        if m:
+            _warm_projects_cache(m.group(1), m.group(2))
+
+
+_warm_all_local_months()
 
 
 # ── Frontend (SPA catch-all) ──────────────────────────────────────────────────
@@ -107,7 +146,7 @@ def download():
         msg = download_csv_from_odoo(
             ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD,
             year, month, EXPORT_PATH, export_name)
-        _invalidate_projects_cache(year, month)  # fresh CSV → stale cached projects
+        _warm_projects_cache(year, month)  # fresh CSV → eagerly rebuild cached projects
         return jsonify({'success': True, 'message': msg or 'Download completato', 'output_path': EXPORT_PATH})
     except Exception:
         return jsonify({'success': False, 'message': traceback.format_exc()}), 500
@@ -207,18 +246,10 @@ def list_projects():
     if cached is not None:
         return jsonify({'success': True, 'projects': cached})
 
+    # Not pre-warmed for this month (e.g. never downloaded in this worker) —
+    # build it now as a fallback and store it for next time.
     try:
-        pd.options.mode.chained_assignment = None
-        _ensure_csv_local(year, month)
-        import generazione_rapportini_peve as gen_a
-        import generazione_rapportini_fausto as gen_f
-        # Parse the CSV once and share the DataFrame between both listings.
-        df_source = gen_a.load_df(EXPORT_PATH, year, month)
-        projects = []
-        for p in gen_a.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
-            projects.append({**p, 'report_type': 'peve'})
-        for p in gen_f.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
-            projects.append({**p, 'report_type': 'fausto'})
+        projects = _build_projects(year, month)
         _PROJECTS_CACHE[(str(year), str(month))] = projects
         return jsonify({'success': True, 'projects': projects})
     except Exception:
