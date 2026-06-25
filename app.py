@@ -410,8 +410,10 @@ def serve_pdf():
 
     if report_type == 'peve':
         storage_prefix = f'Output_Rapportini_Peve/{year}_{month}'
+        local_root     = OUTPUT_PEVE
     elif report_type == 'fausto':
         storage_prefix = f'Output_Rapportini_Fausto/{year}_{month}'
+        local_root     = OUTPUT_FAUSTO
     else:
         return jsonify({'success': False, 'message': f'Tipo sconosciuto: {report_type}'}), 400
 
@@ -420,17 +422,29 @@ def serve_pdf():
     filename = (f'{year}-{month} _' + task_category.upper() + '_'
                 + re.split(r'[ ]', partner_name)[0] + _sep + _proj + '.pdf')
     storage_key = f'{storage_prefix}/{filename}'
+    # regenerate_pdf() writes the fresh PDF to this local path synchronously, so
+    # prefer it over Supabase: the Supabase CDN can serve a stale copy for a few
+    # seconds after an upsert, which left the preview showing the old file right
+    # after a Gemini edit (until the modal was reopened). Fall back to Supabase
+    # only on cold start, when the local file is absent.
+    local_path = os.path.join(_ROOT, local_root, f'{year}_{month}', filename)
 
     if request.method == 'HEAD':
+        if os.path.isfile(local_path):
+            return '', 200
         from storage import object_exists
         if not object_exists(storage_key):
             return jsonify({'success': False, 'message': f'PDF non trovato: {filename}'}), 404
         return '', 200
 
-    try:
-        data = download_to_bytes(storage_key)
-    except Exception:
-        return jsonify({'success': False, 'message': f'PDF non trovato: {filename}'}), 404
+    if os.path.isfile(local_path):
+        with open(local_path, 'rb') as f:
+            data = f.read()
+    else:
+        try:
+            data = download_to_bytes(storage_key)
+        except Exception:
+            return jsonify({'success': False, 'message': f'PDF non trovato: {filename}'}), 404
 
     resp = send_file(io.BytesIO(data), mimetype='application/pdf')
     resp.headers['Content-Disposition'] = f'inline; filename="{filename}"'
