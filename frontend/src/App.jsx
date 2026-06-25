@@ -52,11 +52,15 @@ export default function App() {
     setBusy(action)
     addLog({ action, status: 'running', message: `${ACTION_LABELS[action]} in corso per ${period}…`, period })
 
+    // Live progress: each line the running script prints replaces the running
+    // entry's message, so the Log operazioni shows what's happening right now.
+    const onProgress = (msg) => updateLastLog({ message: msg })
+
     const apiCall = {
-      download:   () => api.download(year, month),
-      peve:       () => api.generatePeve(year, month),
-      fausto:     () => api.generateFausto(year, month),
-      riassunti:  () => api.generateRiassunti(year, month),
+      download:   () => api.download(year, month, onProgress),
+      peve:       () => api.generatePeve(year, month, onProgress),
+      fausto:     () => api.generateFausto(year, month, onProgress),
+      riassunti:  () => api.generateRiassunti(year, month, onProgress),
     }
 
     try {

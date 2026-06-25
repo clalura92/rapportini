@@ -8,6 +8,42 @@ async function post(path, body) {
   return res.json()
 }
 
+// POST to an SSE endpoint that streams live progress. Each `progress` event
+// invokes onProgress(message) so the caller can show "what's happening"; the
+// final `done` event is returned as the result {success, message, output_path?}.
+async function postStream(path, body, onProgress) {
+  const res = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.body) return res.json()  // no stream support → fall back to plain JSON
+
+  const reader  = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf  = ''
+  let done = null
+
+  while (true) {
+    const { value, done: streamDone } = await reader.read()
+    if (streamDone) break
+    buf += decoder.decode(value, { stream: true })
+    // SSE frames are separated by a blank line.
+    let sep
+    while ((sep = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, sep)
+      buf = buf.slice(sep + 2)
+      const dataLine = frame.split('\n').find(l => l.startsWith('data:'))
+      if (!dataLine) continue
+      let payload
+      try { payload = JSON.parse(dataLine.slice(5).trim()) } catch { continue }
+      if (payload.type === 'progress') onProgress?.(payload.message)
+      else if (payload.type === 'done') done = payload
+    }
+  }
+  return done ?? { success: false, message: 'Stream interrotto prima del completamento' }
+}
+
 // In-memory prefetch cache for the projects list, keyed by `${year}-${month}`.
 // The dashboard warms this on load (see App.jsx) so switching to the Progetti
 // tab resolves instantly with no network round-trip. The list only changes when
@@ -30,10 +66,10 @@ function _fetchProjects(year, month) {
 }
 
 export const api = {
-  download:           (year, month) => post('/download',             { year, month }),
-  generatePeve:       (year, month) => post('/generate/peve',        { year, month }),
-  generateFausto:     (year, month) => post('/generate/fausto',      { year, month }),
-  generateRiassunti:  (year, month) => post('/generate/riassunti',   { year, month }),
+  download:           (year, month, onProgress) => postStream('/download',           { year, month }, onProgress),
+  generatePeve:       (year, month, onProgress) => postStream('/generate/peve',       { year, month }, onProgress),
+  generateFausto:     (year, month, onProgress) => postStream('/generate/fausto',     { year, month }, onProgress),
+  generateRiassunti:  (year, month, onProgress) => postStream('/generate/riassunti',  { year, month }, onProgress),
   listProjects:       (year, month, { force = false } = {}) => {
     const key = _projectsKey(year, month)
     if (force) _projectsCache.delete(key)

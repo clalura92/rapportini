@@ -1,5 +1,9 @@
 import os
 import re
+import sys
+import json
+import queue
+import threading
 import traceback
 from datetime import datetime
 
@@ -8,7 +12,7 @@ import io
 import zipfile
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory, Response
 
 from storage import download_to_bytes, list_prefix, to_storage_key
 
@@ -37,19 +41,48 @@ OUTPUT_FAUSTO    = _tmp + '/Output_Rapportini_Fausto/'
 OUTPUT_RIASSUNTO = _tmp + '/Output_Riassunto/'
 
 # ── Business rules ────────────────────────────────────────────────────────────
-ELIGIBILITY_RULES = {
+# Rapportini Fausto and Rapportini Peve use *different* employee-eligibility,
+# partner-isolation and partner-rename rules. Riassunti follow the Fausto rules.
+
+# Rapportini Fausto (and Riassunti)
+FAUSTO_ELIGIBILITY_RULES = {
     'Stefano Uboldi': ['*'],
     'Matteo Franceschini': ['*'],
     'Giovanni Verderio': ['*'],
     'Filippo Cerutti': ['*'],
-    'Francesco Cerutti': ['*'],
     'Tony Fogliaro': ['*'],
     'Daniele Cecchetto': ['*'],
+    'Francesco Cerutti': ['*'],
     'Alessandro Peverelli': ['Tag S.r.l.'],
 }
+FAUSTO_TO_ISOLATE_LIST = ['Frilli Srl', 'Corden Pharma Spa']
+FAUSTO_DICT_PARTNER_RENAME = {'CGT Compagnia Generale Trattori Spa': 'CGT Spa'}
 
-TO_ISOLATE_LIST = ['Frilli Srl', 'Corden Pharma Spa']
-DICT_PARTNER_RENAME = {'CGT Compagnia Generale Trattori Spa': 'CGT Spa'}
+# Rapportini Peve
+PEVE_ELIGIBILITY_RULES = {
+    'Diego Attubato': ['*'],
+    'Alessandro Peverelli': ['*'],
+}
+PEVE_TO_ISOLATE_LIST = [
+    'Ab Impianti Srl',
+    'Ab Service Srl',
+    'Burgo Group Spa',
+    'Cgt Compagnia Generale Trattori Spa',
+    'Cpl Concordia Soc. Coop.',
+    'Ecotermica SRL',
+    'Effetre Fenice Energia Srl',
+    'Engie Servizi Spa',
+    'Fedrigoni Spa',
+    'Grastim Srl',
+    'Intergen Srl',
+    'Lucart Spa',
+    'Siram Spa',
+]
+PEVE_DICT_PARTNER_RENAME = {
+    'CGT Compagnia Generale Trattori Spa': 'CGT Spa',
+    'Ab Impianti Srl': 'Ab Service Srl',
+}
+
 FILTERED_PARTNERS = []
 
 
@@ -90,9 +123,9 @@ def _build_projects(year, month):
     # Parse the CSV once and share the DataFrame between both listings.
     df_source = gen_a.load_df(EXPORT_PATH, year, month)
     projects = []
-    for p in gen_a.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
+    for p in gen_a.list_projects(EXPORT_PATH, year, month, PEVE_ELIGIBILITY_RULES, PEVE_TO_ISOLATE_LIST, PEVE_DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
         projects.append({**p, 'report_type': 'peve'})
-    for p in gen_f.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
+    for p in gen_f.list_projects(EXPORT_PATH, year, month, FAUSTO_ELIGIBILITY_RULES, FAUSTO_TO_ISOLATE_LIST, FAUSTO_DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
         projects.append({**p, 'report_type': 'fausto'})
     return projects
 
@@ -123,6 +156,81 @@ def _warm_all_local_months():
 _warm_all_local_months()
 
 
+# ── Live progress streaming ───────────────────────────────────────────────────
+# The generation scripts report progress through plain print() calls. To surface
+# "what's happening" in the UI's Log operazioni we run the (blocking) script in a
+# worker thread, capture its stdout, and stream each meaningful line to the
+# browser as a Server-Sent Event. The final event carries the JSON result.
+
+def _is_progress_noise(line):
+    """Drop debug chatter and the glob/dir/shape dumps the user doesn't want
+    (those are the 'list of all files' lines), keeping only meaningful steps."""
+    l = line.strip()
+    if not l:
+        return True
+    if l.startswith(('[', '(', '{')):        # glob lists, dir listings, df.shape tuples
+        return True
+    if l.startswith('DEBUG'):
+        return True
+    if l.startswith('     ... file_path'):
+        return True
+    if l in ('sheet removed', 'sheet saved', 'sheet closed'):
+        return True
+    return False
+
+
+def _sse(payload):
+    return f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
+
+
+def _stream_script(run_fn):
+    """Run `run_fn()` (which returns the success payload dict) in a thread while
+    streaming its print() output as SSE 'progress' events, then a final 'done'
+    event with {success, message, output_path?}."""
+    q = queue.Queue()
+    _DONE = object()
+    result = {}
+
+    class _LineWriter(io.TextIOBase):
+        def __init__(self):
+            self._buf = ''
+        def write(self, s):
+            self._buf += s
+            while '\n' in self._buf:
+                line, self._buf = self._buf.split('\n', 1)
+                if not _is_progress_noise(line):
+                    q.put(line.strip())
+            return len(s)
+        def flush(self):
+            pass
+
+    def worker():
+        old_stdout = sys.stdout
+        sys.stdout = _LineWriter()
+        try:
+            result['payload'] = run_fn()
+        except Exception:
+            result['error'] = traceback.format_exc()
+        finally:
+            sys.stdout = old_stdout
+            q.put(_DONE)
+
+    def generate():
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = q.get()
+            if item is _DONE:
+                break
+            yield _sse({'type': 'progress', 'message': item})
+        if 'error' in result:
+            yield _sse({'type': 'done', 'success': False, 'message': result['error']})
+        else:
+            yield _sse({'type': 'done', 'success': True, **(result.get('payload') or {})})
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
 # ── Frontend (SPA catch-all) ──────────────────────────────────────────────────
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
@@ -144,16 +252,15 @@ def download():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
     export_name = f'{year}_{month}_timesheets_extraction.csv'
-    try:
+    def run():
         pd.options.mode.chained_assignment = None
         from download_from_odoo import download_csv_from_odoo
         msg = download_csv_from_odoo(
             ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD,
             year, month, EXPORT_PATH, export_name)
         _warm_projects_cache(year, month)  # fresh CSV → eagerly rebuild cached projects
-        return jsonify({'success': True, 'message': msg or 'Download completato', 'output_path': EXPORT_PATH})
-    except Exception:
-        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+        return {'message': msg or 'Download completato', 'output_path': EXPORT_PATH}
+    return _stream_script(run)
 
 
 # ── Generate Rapportini Peve ──────────────────────────────────────────────────
@@ -161,7 +268,7 @@ def download():
 def generate_peve():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    try:
+    def run():
         pd.options.mode.chained_assignment = None
         _ensure_csv_local(year, month)
         import generazione_rapportini_peve as gen
@@ -171,17 +278,15 @@ def generate_peve():
             year=year,
             month=month,
             filtered_partners=FILTERED_PARTNERS,
-            eligibility_rules=ELIGIBILITY_RULES,
-            to_isolate_list=TO_ISOLATE_LIST,
-            dict_partner_rename=DICT_PARTNER_RENAME,
+            eligibility_rules=PEVE_ELIGIBILITY_RULES,
+            to_isolate_list=PEVE_TO_ISOLATE_LIST,
+            dict_partner_rename=PEVE_DICT_PARTNER_RENAME,
             tasks=['Assistenza'])
-        return jsonify({
-            'success': True,
+        return {
             'message': f'Rapportini Peve generati per {year}-{month}',
             'output_path': OUTPUT_PEVE + f'{year}_{month}/'
-        })
-    except Exception:
-        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+        }
+    return _stream_script(run)
 
 
 # ── Generate Rapportini Fausto ────────────────────────────────────────────────
@@ -189,7 +294,7 @@ def generate_peve():
 def generate_fausto():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    try:
+    def run():
         pd.options.mode.chained_assignment = None
         _ensure_csv_local(year, month)
         import generazione_rapportini_fausto as gen
@@ -199,17 +304,15 @@ def generate_fausto():
             year=year,
             month=month,
             filtered_partners=FILTERED_PARTNERS,
-            eligibility_rules=ELIGIBILITY_RULES,
-            to_isolate_list=TO_ISOLATE_LIST,
-            dict_partner_rename=DICT_PARTNER_RENAME,
+            eligibility_rules=FAUSTO_ELIGIBILITY_RULES,
+            to_isolate_list=FAUSTO_TO_ISOLATE_LIST,
+            dict_partner_rename=FAUSTO_DICT_PARTNER_RENAME,
             tasks=['Assistenza', 'Intervento'])
-        return jsonify({
-            'success': True,
+        return {
             'message': f'Rapportini Fausto generati per {year}-{month}',
             'output_path': OUTPUT_FAUSTO + f'{year}_{month}/'
-        })
-    except Exception:
-        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+        }
+    return _stream_script(run)
 
 
 # ── Generate Riassunti ────────────────────────────────────────────────────────
@@ -217,7 +320,7 @@ def generate_fausto():
 def generate_riassunti():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    try:
+    def run():
         pd.options.mode.chained_assignment = None
         _ensure_csv_local(year, month)
         import generazione_riassunti as gen
@@ -227,17 +330,15 @@ def generate_riassunti():
             year=year,
             month=month,
             filtered_partners=FILTERED_PARTNERS,
-            eligibility_rules=ELIGIBILITY_RULES,
-            to_isolate_list=TO_ISOLATE_LIST,
-            dict_partner_rename=DICT_PARTNER_RENAME,
+            eligibility_rules=FAUSTO_ELIGIBILITY_RULES,
+            to_isolate_list=FAUSTO_TO_ISOLATE_LIST,
+            dict_partner_rename=FAUSTO_DICT_PARTNER_RENAME,
             tasks=['Assistenza', 'Intervento'])
-        return jsonify({
-            'success': True,
+        return {
             'message': f'Riassunti generati per {year}-{month}',
             'output_path': OUTPUT_RIASSUNTO
-        })
-    except Exception:
-        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+        }
+    return _stream_script(run)
 
 
 # ── List projects (Peve + Fausto) ────────────────────────────────────────────
@@ -313,9 +414,9 @@ def generate_single():
                 year=year,
                 month=month,
                 filtered_partners=FILTERED_PARTNERS,
-                eligibility_rules=ELIGIBILITY_RULES,
-                to_isolate_list=TO_ISOLATE_LIST,
-                dict_partner_rename=DICT_PARTNER_RENAME,
+                eligibility_rules=PEVE_ELIGIBILITY_RULES,
+                to_isolate_list=PEVE_TO_ISOLATE_LIST,
+                dict_partner_rename=PEVE_DICT_PARTNER_RENAME,
                 tasks=['Assistenza'],
                 only_task=task_category,
                 only_partner=partner_name,
@@ -329,9 +430,9 @@ def generate_single():
                 year=year,
                 month=month,
                 filtered_partners=FILTERED_PARTNERS,
-                eligibility_rules=ELIGIBILITY_RULES,
-                to_isolate_list=TO_ISOLATE_LIST,
-                dict_partner_rename=DICT_PARTNER_RENAME,
+                eligibility_rules=FAUSTO_ELIGIBILITY_RULES,
+                to_isolate_list=FAUSTO_TO_ISOLATE_LIST,
+                dict_partner_rename=FAUSTO_DICT_PARTNER_RENAME,
                 tasks=['Assistenza', 'Intervento'],
                 only_task=task_category,
                 only_partner=partner_name,
