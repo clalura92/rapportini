@@ -98,9 +98,10 @@ export default function ProjectsList({ year, month, fixedType }) {
       task_category: selectedProject.task_category,
       partner_name: selectedProject.partner_name,
       project_name: selectedProject.project_name || '',
+      v: pdfRefreshKey,                          // cache-buster: unique URL after each edit so the browser refetches
     })
     let cancelled = false
-    fetch(`/api/pdf?${params}`)
+    fetch(`/api/pdf?${params}`, { cache: 'no-store' })
       .then(async r => {
         if (cancelled) return
         if (!r.ok) { setPdfStatus('not_found'); return }

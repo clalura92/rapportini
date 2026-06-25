@@ -434,6 +434,7 @@ def serve_pdf():
 
     resp = send_file(io.BytesIO(data), mimetype='application/pdf')
     resp.headers['Content-Disposition'] = f'inline; filename="{filename}"'
+    resp.headers['Cache-Control'] = 'no-store'
     return resp
 
 
