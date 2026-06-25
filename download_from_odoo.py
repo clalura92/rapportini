@@ -73,8 +73,7 @@ def export_to_csv(df, export_path, export_name):
     print('3/4 - Export to csv started...')
     file_path = export_path+export_name
     print(f'     ... file_path {file_path} ...')
-    if not os.path.exists('./'+export_path):
-             os.mkdir('./'+export_path)
+    os.makedirs(export_path, exist_ok=True)
     
     df.to_csv(file_path)
     print('file saved: ', file_path)
