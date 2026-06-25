@@ -36,11 +36,11 @@ export default function ProjectsList({ year, month, fixedType }) {
   const [hasModifications, setHasModifications] = useState(false)
   const chatBottomRef = useRef(null)
 
-  const fetchProjects = useCallback(async () => {
+  const fetchProjects = useCallback(async ({ force = false } = {}) => {
     setLoading(true)
     setLoadError(null)
     try {
-      const data = await api.listProjects(localYear, localMonth)
+      const data = await api.listProjects(localYear, localMonth, { force })
       if (data.success) {
         setProjects(data.projects)
         setRowStatus({})
@@ -304,7 +304,7 @@ export default function ProjectsList({ year, month, fixedType }) {
             Scarica tutti
           </a>
         )}
-        <button className="btn-reload" onClick={fetchProjects} disabled={loading}>
+        <button className="btn-reload" onClick={() => fetchProjects({ force: true })} disabled={loading}>
           {loading ? '⟳' : 'Ricarica lista'}
         </button>
       </div>

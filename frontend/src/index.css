@@ -601,6 +601,41 @@ body {
   font-size: 0.95rem;
 }
 
+/* Example tab */
+.example-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 960px;
+}
+
+.example-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.example-loading {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  align-self: center;
+}
+
+.example-note {
+  background: var(--primary-light);
+  border-radius: 8px;
+  padding: 8px 14px;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+/* Fixed-height, internally scrolling table (header stays sticky on top). */
+.example-panel .projects-table-wrap {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
 .projects-table-wrap {
   overflow-x: auto;
   border-radius: 12px;

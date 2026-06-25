@@ -127,6 +127,10 @@ _warm_all_local_months()
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_frontend(path):
+    # Never let an unmatched /api/* path fall through to index.html — that
+    # returns HTML where the frontend expects JSON ("Unexpected token '<'").
+    if path.startswith('api/'):
+        return jsonify({'success': False, 'message': f'Unknown API route: /{path}'}), 404
     static_dir = app.static_folder
     full = os.path.join(static_dir, path)
     if path and os.path.exists(full):
@@ -252,6 +256,39 @@ def list_projects():
         projects = _build_projects(year, month)
         _PROJECTS_CACHE[(str(year), str(month))] = projects
         return jsonify({'success': True, 'projects': projects})
+    except Exception:
+        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+
+
+# ── Example tab: live cascading Odoo filters ─────────────────────────────────
+_ODOO_CREDS = (ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD)
+
+
+def _example_filter_args():
+    """Read the three filter params; '' means 'All'."""
+    return {
+        'year_month':  request.args.get('year_month') or None,
+        'employee_id': request.args.get('employee_id') or None,
+        'partner_id':  request.args.get('partner_id') or None,
+    }
+
+
+@app.route('/api/example/options', methods=['GET'])
+def example_options():
+    try:
+        import odoo_query
+        opts = odoo_query.get_options(_ODOO_CREDS, **_example_filter_args())
+        return jsonify({'success': True, **opts})
+    except Exception:
+        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+
+
+@app.route('/api/example/timesheets', methods=['GET'])
+def example_timesheets():
+    try:
+        import odoo_query
+        entries, truncated = odoo_query.get_timesheets(_ODOO_CREDS, **_example_filter_args())
+        return jsonify({'success': True, 'entries': entries, 'truncated': truncated})
     except Exception:
         return jsonify({'success': False, 'message': traceback.format_exc()}), 500
 

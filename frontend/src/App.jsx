@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { api } from './api/rapportini'
 import Header from './components/Header'
 import PeriodSelector from './components/PeriodSelector'
@@ -6,6 +6,7 @@ import ActionPanel from './components/ActionPanel'
 import ActivityLog from './components/ActivityLog'
 import ProjectsList from './components/ProjectsList'
 import RiassuntiPanel from './components/RiassuntiPanel'
+import ExamplePanel from './components/ExamplePanel'
 
 const now = new Date()
 let nextId = 1
@@ -25,6 +26,12 @@ export default function App() {
   const [lastResults, setLastResults] = useState({})
   const [activeTab, setActiveTab] = useState('dashboard')
   const [projectsSubTab, setProjectsSubTab] = useState('riassunto')
+
+  // Warm the projects list as soon as the dashboard loads (and whenever the
+  // period changes), so switching to the Progetti tab is instant.
+  useEffect(() => {
+    api.prefetchProjects(year, month)
+  }, [year, month])
 
   const addLog = useCallback((entry) => {
     setLog(prev => [{ id: nextId++, time: new Date(), ...entry }, ...prev])
@@ -57,6 +64,12 @@ export default function App() {
       const status = data.success ? 'success' : 'error'
       updateLastLog({ status, message: data.message, outputPath: data.output_path ?? null })
       setLastResults(prev => ({ ...prev, [action]: status }))
+      // A fresh Odoo download changes the project list — drop the stale cache
+      // and re-warm so the Progetti tab reflects the new data.
+      if (action === 'download' && status === 'success') {
+        api.invalidateProjects(year, month)
+        api.prefetchProjects(year, month)
+      }
     } catch (err) {
       updateLastLog({ status: 'error', message: `Errore di rete: ${err.message}` })
       setLastResults(prev => ({ ...prev, [action]: 'error' }))
@@ -81,6 +94,12 @@ export default function App() {
           onClick={() => setActiveTab('projects')}
         >
           Progetti
+        </button>
+        <button
+          className={`tab-btn${activeTab === 'example' ? ' tab-btn--active' : ''}`}
+          onClick={() => setActiveTab('example')}
+        >
+          Example
         </button>
       </div>
 
@@ -136,6 +155,8 @@ export default function App() {
           {projectsSubTab === 'peve'      && <ProjectsList year={year} month={month} fixedType="peve" />}
         </>
       )}
+
+      {activeTab === 'example' && <ExamplePanel />}
     </div>
   )
 }
