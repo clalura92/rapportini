@@ -27,6 +27,7 @@ from os.path import isfile, join
 import string
 import shutil
 import glob
+import gc
 
 
 def is_daylight(date):
@@ -383,15 +384,22 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
             print('name_file to save: ', month_dir + name_file_riassunto)
             wb.save(month_dir + name_file_riassunto)
             wb.close()
+            del wb
 
             xlsx_abs = os.path.abspath(month_dir + name_file_riassunto)
             xls_abs  = os.path.abspath(month_dir + name_file_riassunto[:-1])
+            # Spire loads the whole workbook into the .NET heap, so Dispose() +
+            # gc.collect() after each task_category conversion keeps peak memory
+            # flat across the Assistenza/Intervento iterations (Render free tier
+            # is 512MB). The riassunto is one multi-sheet file per task_category
+            # by design, so it can't be split per partner like the Peve files.
             try:
                 print('start of spire.Workbook')
                 workbook = spire.Workbook()
                 workbook.LoadFromFile(xlsx_abs)
                 workbook.SaveToFile(xls_abs, ExcelVersion.Version97to2003)
                 workbook.Dispose()
+                del workbook
                 os.remove(month_dir + name_file_riassunto)
                 print(f'Riassunto XLS saved: {xls_abs}')
                 try:
@@ -409,6 +417,8 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
                     print(f'Uploaded to Supabase: {to_storage_key(xlsx_abs)}')
                 except Exception as sup_err:
                     print(f'Supabase upload failed (non-fatal): {sup_err}')
+            finally:
+                gc.collect()
 
     except Exception as e:
         print(f"Error in create_riassunto: ", e)

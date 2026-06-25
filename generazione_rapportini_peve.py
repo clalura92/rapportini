@@ -31,6 +31,7 @@ from os.path import isfile, join
 import string
 import shutil
 import glob
+import gc
 
 
 def is_daylight(date):
@@ -247,6 +248,8 @@ def _clean_spire_pdf(pdf_path):
             page.insert_image(_LOGO_RECT, filename=_LOGO_PATH, keep_proportion=True)
     doc.save(tmp_path, garbage=4, deflate=True)
     doc.close()
+    del doc
+    gc.collect()
     os.replace(tmp_path, pdf_path)
 
 
@@ -448,42 +451,43 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
 
             wb.remove(wb.worksheets[0])
             print('sheet removed')
-            wb.save(out_dir + str(year) + '-' + str(month) + ' _' + task_category.upper() + '_' + re.split(r"[ ]", partner)[0] + (' - ' if project != '' else '') + project + '.xlsx')
+            xlsx_name = (str(year) + '-' + str(month) + ' _' + task_category.upper() + '_'
+                         + re.split(r"[ ]", partner)[0] + (' - ' if project != '' else '') + project + '.xlsx')
+            xlsx_path = os.path.abspath(os.path.join(out_dir, xlsx_name))
+            wb.save(xlsx_path)
             print('sheet saved')
             wb.close()
+            del wb
             print('sheet closed')
+
+            # Convert this partner's workbook to PDF right away, then release
+            # everything before moving to the next partner. Spire loads the whole
+            # workbook into the .NET heap, so we Dispose() + gc.collect() per file
+            # to keep peak memory flat (Render free tier is 512MB). Generating and
+            # converting one partner at a time avoids holding every file in memory.
+            pdf_path = xlsx_path.replace('.xlsx', '.pdf')
+            print('Generating PDF locally...')
+            try:
+                wb_pdf = spire.Workbook()
+                wb_pdf.LoadFromFile(xlsx_path)
+                wb_pdf.SaveToFile(pdf_path, spire.FileFormat.PDF)
+                wb_pdf.Dispose()
+                del wb_pdf
+                _clean_spire_pdf(pdf_path)
+                print(f'PDF generated: {pdf_path}')
+                try:
+                    from storage import upload_file, to_storage_key
+                    upload_file(xlsx_path, to_storage_key(xlsx_path))
+                    upload_file(pdf_path,  to_storage_key(pdf_path))
+                    print(f'Uploaded to Supabase: {to_storage_key(xlsx_path)}')
+                except Exception as sup_err:
+                    print(f'Supabase upload failed (non-fatal): {sup_err}')
+            except Exception as spire_err:
+                print(f'Spire PDF failed for {xlsx_name}, skipping: {spire_err}')
+            finally:
+                gc.collect()
 
     print(glob.glob('*'))
     print(glob.glob(path_output + '/*'))
     print([i for i in os.listdir(out_dir) if i.endswith(".xlsx")])
-
-    print('Generating PDFs locally...')
-    if only_partner is not None:
-        _proj = only_project if only_project else ''
-        _sep  = ' - ' if _proj else ''
-        _fname = (str(year) + '-' + str(month) + ' _' + only_task.upper() + '_'
-                  + re.split(r"[ ]", only_partner)[0] + _sep + _proj + '.xlsx')
-        xlsx_candidates = [_fname] if os.path.exists(os.path.join(out_dir, _fname)) else []
-    else:
-        xlsx_candidates = [x for x in os.listdir(out_dir) if x.endswith('.xlsx')]
-
-    for f in xlsx_candidates:
-        xlsx_path = os.path.abspath(os.path.join(out_dir, f))
-        pdf_path  = os.path.abspath(os.path.join(out_dir, f.replace('.xlsx', '.pdf')))
-        try:
-            wb_pdf = spire.Workbook()
-            wb_pdf.LoadFromFile(xlsx_path)
-            wb_pdf.SaveToFile(pdf_path, spire.FileFormat.PDF)
-            wb_pdf.Dispose()
-            _clean_spire_pdf(pdf_path)
-            print(f'PDF generated: {pdf_path}')
-            try:
-                from storage import upload_file, to_storage_key
-                upload_file(xlsx_path, to_storage_key(xlsx_path))
-                upload_file(pdf_path,  to_storage_key(pdf_path))
-                print(f'Uploaded to Supabase: {to_storage_key(xlsx_path)}')
-            except Exception as sup_err:
-                print(f'Supabase upload failed (non-fatal): {sup_err}')
-        except Exception as spire_err:
-            print(f'Spire PDF failed for {f}, skipping: {spire_err}')
     print('PDF generation complete')
