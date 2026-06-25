@@ -273,11 +273,17 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
             print('Post - load templates: ', name_file_riassunto)          
 
 
-            for index, row in partners_projects.sort_values(['partner_name']).iterrows():
+            rows_to_process = partners_projects.sort_values(['partner_name'])
+            total_to_process = len(rows_to_process)
+            progress_done = 0
+            for index, row in rows_to_process.iterrows():
                 partner = row['partner_name']
                 project = row['project_name']
                 employees = list(set(row['employee_name']))
                 flag_to_isolate = partner in to_isolate_list
+                progress_done += 1
+                # Sentinel line the backend turns into a "Elaborazione N/M" counter.
+                print(f'@@PROGRESS@@\x1f{progress_done}\x1f{total_to_process}\x1f{task_category} · {partner} - {project}')
                 print(f'Inizio {task_category} - {partner} - {project} ')
                 print('df pre filter: ',df_all.shape)
 

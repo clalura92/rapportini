@@ -308,7 +308,10 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
         template_name = 'templates/Template - Rapportino - Peve.xlsx'
         print(template_name)
 
-        for index, row in partners_projects.sort_values(['partner_name']).iterrows():
+        rows_to_process = partners_projects.sort_values(['partner_name'])
+        total_to_process = len(rows_to_process)
+        progress_done = 0
+        for index, row in rows_to_process.iterrows():
             partner = row['partner_name']
             project = row['project_name']
             if only_partner and partner != only_partner:
@@ -317,6 +320,9 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
                 continue
             employees = list(set(row['employee_name']))
             flag_to_isolate = partner in to_isolate_list
+            progress_done += 1
+            # Sentinel line the backend turns into a "Elaborazione N/M" counter.
+            print(f'@@PROGRESS@@\x1f{progress_done}\x1f{total_to_process}\x1f{task_category} · {partner} - {project}')
             print(f'{task_category} - {partner} - {project} - {flag_to_isolate} - Inizio elaborazione')
 
             wb = load_workbook(template_name)

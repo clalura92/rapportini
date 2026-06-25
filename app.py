@@ -3,8 +3,10 @@ import re
 import sys
 import json
 import queue
+import tempfile
 import threading
 import traceback
+import subprocess
 from datetime import datetime
 
 import pandas as pd
@@ -15,6 +17,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file, send_from_directory, Response
 
 from storage import download_to_bytes, list_prefix, to_storage_key
+import report_config as cfg
 
 load_dotenv()
 
@@ -32,58 +35,23 @@ ODOO_DB       = os.environ.get('ODOO_DB',       'dueesseti-solware1-main-7378424
 ODOO_USERNAME = os.environ.get('ODOO_USERNAME', 'fausto.luraschi@solware.it')
 ODOO_PASSWORD = os.environ.get('ODOO_PASSWORD', 'Fausto@6148')
 
-# ── Paths (ephemeral /tmp on Render, local dir in dev) ────────────────────────
-_ON_RENDER = os.environ.get('RENDER') is not None
-_tmp = '/tmp' if _ON_RENDER else '.'
-EXPORT_PATH      = _tmp + '/Odoo exports/'
-OUTPUT_PEVE      = _tmp + '/Output_Rapportini_Peve/'
-OUTPUT_FAUSTO    = _tmp + '/Output_Rapportini_Fausto/'
-OUTPUT_RIASSUNTO = _tmp + '/Output_Riassunto/'
+# ── Paths & business rules ────────────────────────────────────────────────────
+# Live in report_config so the generation subprocess (generate_worker.py) shares
+# them without importing — and thereby booting — this whole Flask app.
+EXPORT_PATH      = cfg.EXPORT_PATH
+OUTPUT_PEVE      = cfg.OUTPUT_PEVE
+OUTPUT_FAUSTO    = cfg.OUTPUT_FAUSTO
+OUTPUT_RIASSUNTO = cfg.OUTPUT_RIASSUNTO
 
-# ── Business rules ────────────────────────────────────────────────────────────
-# Rapportini Fausto and Rapportini Peve use *different* employee-eligibility,
-# partner-isolation and partner-rename rules. Riassunti follow the Fausto rules.
+FAUSTO_ELIGIBILITY_RULES   = cfg.FAUSTO_ELIGIBILITY_RULES
+FAUSTO_TO_ISOLATE_LIST     = cfg.FAUSTO_TO_ISOLATE_LIST
+FAUSTO_DICT_PARTNER_RENAME = cfg.FAUSTO_DICT_PARTNER_RENAME
+PEVE_ELIGIBILITY_RULES     = cfg.PEVE_ELIGIBILITY_RULES
+PEVE_TO_ISOLATE_LIST       = cfg.PEVE_TO_ISOLATE_LIST
+PEVE_DICT_PARTNER_RENAME   = cfg.PEVE_DICT_PARTNER_RENAME
+FILTERED_PARTNERS          = cfg.FILTERED_PARTNERS
 
-# Rapportini Fausto (and Riassunti)
-FAUSTO_ELIGIBILITY_RULES = {
-    'Stefano Uboldi': ['*'],
-    'Matteo Franceschini': ['*'],
-    'Giovanni Verderio': ['*'],
-    'Filippo Cerutti': ['*'],
-    'Tony Fogliaro': ['*'],
-    'Daniele Cecchetto': ['*'],
-    'Francesco Cerutti': ['*'],
-    'Alessandro Peverelli': ['Tag S.r.l.'],
-}
-FAUSTO_TO_ISOLATE_LIST = ['Frilli Srl', 'Corden Pharma Spa']
-FAUSTO_DICT_PARTNER_RENAME = {'CGT Compagnia Generale Trattori Spa': 'CGT Spa'}
-
-# Rapportini Peve
-PEVE_ELIGIBILITY_RULES = {
-    'Diego Attubato': ['*'],
-    'Alessandro Peverelli': ['*'],
-}
-PEVE_TO_ISOLATE_LIST = [
-    'Ab Impianti Srl',
-    'Ab Service Srl',
-    'Burgo Group Spa',
-    'Cgt Compagnia Generale Trattori Spa',
-    'Cpl Concordia Soc. Coop.',
-    'Ecotermica SRL',
-    'Effetre Fenice Energia Srl',
-    'Engie Servizi Spa',
-    'Fedrigoni Spa',
-    'Grastim Srl',
-    'Intergen Srl',
-    'Lucart Spa',
-    'Siram Spa',
-]
-PEVE_DICT_PARTNER_RENAME = {
-    'CGT Compagnia Generale Trattori Spa': 'CGT Spa',
-    'Ab Impianti Srl': 'Ab Service Srl',
-}
-
-FILTERED_PARTNERS = []
+_ensure_csv_local = cfg.ensure_csv_local
 
 
 def _get_year_month(data):
@@ -99,19 +67,6 @@ def _get_year_month(data):
 # build the result eagerly — at worker startup for any CSV already on disk, and
 # again right after each download — keyed by (year, month) in memory.
 _PROJECTS_CACHE = {}
-
-
-def _ensure_csv_local(year, month):
-    """Download the Odoo CSV from Supabase if it's not already on local disk."""
-    csv_name = f'{year}_{month}_timesheets_extraction.csv'
-    local_csv = EXPORT_PATH + csv_name
-    if not os.path.isfile(local_csv):
-        try:
-            os.makedirs(EXPORT_PATH, exist_ok=True)
-            with open(local_csv, 'wb') as f:
-                f.write(download_to_bytes(f'Odoo exports/{csv_name}'))
-        except Exception:
-            pass  # generation modules will raise their own error if file is missing
 
 
 def _build_projects(year, month):
@@ -162,6 +117,25 @@ _warm_all_local_months()
 # worker thread, capture its stdout, and stream each meaningful line to the
 # browser as a Server-Sent Event. The final event carries the JSON result.
 
+# Generation scripts mark per-project progress with a sentinel line so the UI can
+# show a clean "Elaborazione 5/15 — …" counter instead of every single print().
+# Format: "@@PROGRESS@@␟{done}␟{total}␟{label}" (␟ = unit separator, U+001F).
+PROGRESS_PREFIX = '@@PROGRESS@@'
+PROGRESS_SEP = '\x1f'
+
+
+def _format_progress(line):
+    """Translate a sentinel progress line into a human-readable message, or
+    return None when `line` is not a progress sentinel."""
+    if not line.startswith(PROGRESS_PREFIX):
+        return None
+    parts = line.split(PROGRESS_SEP)
+    if len(parts) < 4:
+        return None
+    done, total, label = parts[1], parts[2], parts[3]
+    return f'Elaborazione {done}/{total} — {label}'
+
+
 def _is_progress_noise(line):
     """Drop debug chatter and the glob/dir/shape dumps the user doesn't want
     (those are the 'list of all files' lines), keeping only meaningful steps."""
@@ -183,10 +157,14 @@ def _sse(payload):
     return f'data: {json.dumps(payload, ensure_ascii=False)}\n\n'
 
 
-def _stream_script(run_fn):
+def _stream_script(run_fn, progress_only=False):
     """Run `run_fn()` (which returns the success payload dict) in a thread while
     streaming its print() output as SSE 'progress' events, then a final 'done'
-    event with {success, message, output_path?}."""
+    event with {success, message, output_path?}.
+
+    When `progress_only` is True only the structured progress counter is
+    surfaced (every other print is hidden) — used by the generation endpoints so
+    the Log operazioni tracks "Elaborazione N/M" rather than each single line."""
     q = queue.Queue()
     _DONE = object()
     result = {}
@@ -198,8 +176,12 @@ def _stream_script(run_fn):
             self._buf += s
             while '\n' in self._buf:
                 line, self._buf = self._buf.split('\n', 1)
-                if not _is_progress_noise(line):
-                    q.put(line.strip())
+                line = line.strip()
+                progress = _format_progress(line)
+                if progress is not None:
+                    q.put(progress)
+                elif not progress_only and not _is_progress_noise(line):
+                    q.put(line)
             return len(s)
         def flush(self):
             pass
@@ -226,6 +208,83 @@ def _stream_script(run_fn):
             yield _sse({'type': 'done', 'success': False, 'message': result['error']})
         else:
             yield _sse({'type': 'done', 'success': True, **(result.get('payload') or {})})
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+_WORKER_SCRIPT = os.path.join(_ROOT, 'generate_worker.py')
+
+
+def _run_worker_streaming(job, progress_only=True):
+    """Run a generation job in generate_worker.py as a *separate process*,
+    streaming its stdout as it goes and yielding (lines, result). Each line is a
+    human-readable progress message; the final yielded tuple is (None, result)
+    where result is {'success': bool, 'payload'|'error': ...}.
+
+    Spire.XLS runs on an embedded .NET CLR whose heap is never returned to the
+    OS within a process, so generating in the long-lived gunicorn worker leaves
+    its RSS permanently elevated. Running in a child process means the OS
+    reclaims *all* of that memory the instant the child exits — keeping the web
+    worker under Render's 512MB cap across back-to-back Peve/Fausto runs."""
+    fd, result_path = tempfile.mkstemp(suffix='.json', prefix='gen_result_')
+    os.close(fd)
+    job = {**job, 'result_path': result_path}
+
+    env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
+    proc = subprocess.Popen(
+        [sys.executable, '-u', _WORKER_SCRIPT],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding='utf-8', errors='replace', env=env, cwd=_ROOT,
+    )
+    proc.stdin.write(json.dumps(job))
+    proc.stdin.close()
+
+    for raw in proc.stdout:
+        line = raw.rstrip('\n').strip()
+        progress = _format_progress(line)
+        if progress is not None:
+            yield progress, None
+        elif not progress_only and not _is_progress_noise(line):
+            yield line, None
+    proc.wait()
+
+    try:
+        with open(result_path, 'r', encoding='utf-8') as f:
+            result = json.load(f)
+    except Exception:
+        result = {'success': False,
+                  'error': f'Worker terminato senza risultato (exit code {proc.returncode}).'}
+    finally:
+        try:
+            os.remove(result_path)
+        except OSError:
+            pass
+    yield None, result
+
+
+def _stream_worker(job, progress_only=True, on_success=None):
+    """SSE wrapper around `_run_worker_streaming`: stream progress events, then a
+    final 'done' event. `on_success(payload)` runs in the web process after a
+    successful job (e.g. to refresh the in-memory cache)."""
+    def generate():
+        result = {'success': False, 'error': 'Nessun risultato.'}
+        for message, res in _run_worker_streaming(job, progress_only=progress_only):
+            if res is None:
+                yield _sse({'type': 'progress', 'message': message})
+            else:
+                result = res
+        if result.get('success'):
+            payload = result.get('payload') or {}
+            if on_success:
+                try:
+                    on_success(payload)
+                except Exception:
+                    pass
+            yield _sse({'type': 'done', 'success': True, **payload})
+        else:
+            yield _sse({'type': 'done', 'success': False,
+                        'message': result.get('error', 'Errore sconosciuto')})
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
@@ -268,25 +327,7 @@ def download():
 def generate_peve():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    def run():
-        pd.options.mode.chained_assignment = None
-        _ensure_csv_local(year, month)
-        import generazione_rapportini_peve as gen
-        gen.create_rapportini(
-            path_source=EXPORT_PATH,
-            path_output=OUTPUT_PEVE,
-            year=year,
-            month=month,
-            filtered_partners=FILTERED_PARTNERS,
-            eligibility_rules=PEVE_ELIGIBILITY_RULES,
-            to_isolate_list=PEVE_TO_ISOLATE_LIST,
-            dict_partner_rename=PEVE_DICT_PARTNER_RENAME,
-            tasks=['Assistenza'])
-        return {
-            'message': f'Rapportini Peve generati per {year}-{month}',
-            'output_path': OUTPUT_PEVE + f'{year}_{month}/'
-        }
-    return _stream_script(run)
+    return _stream_worker({'kind': 'peve', 'year': year, 'month': month})
 
 
 # ── Generate Rapportini Fausto ────────────────────────────────────────────────
@@ -294,25 +335,7 @@ def generate_peve():
 def generate_fausto():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    def run():
-        pd.options.mode.chained_assignment = None
-        _ensure_csv_local(year, month)
-        import generazione_rapportini_fausto as gen
-        gen.create_rapportini(
-            path_source=EXPORT_PATH,
-            path_output=OUTPUT_FAUSTO,
-            year=year,
-            month=month,
-            filtered_partners=FILTERED_PARTNERS,
-            eligibility_rules=FAUSTO_ELIGIBILITY_RULES,
-            to_isolate_list=FAUSTO_TO_ISOLATE_LIST,
-            dict_partner_rename=FAUSTO_DICT_PARTNER_RENAME,
-            tasks=['Assistenza', 'Intervento'])
-        return {
-            'message': f'Rapportini Fausto generati per {year}-{month}',
-            'output_path': OUTPUT_FAUSTO + f'{year}_{month}/'
-        }
-    return _stream_script(run)
+    return _stream_worker({'kind': 'fausto', 'year': year, 'month': month})
 
 
 # ── Generate Riassunti ────────────────────────────────────────────────────────
@@ -320,25 +343,7 @@ def generate_fausto():
 def generate_riassunti():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    def run():
-        pd.options.mode.chained_assignment = None
-        _ensure_csv_local(year, month)
-        import generazione_riassunti as gen
-        gen.create_riassunto(
-            path_source=EXPORT_PATH,
-            path_output=OUTPUT_RIASSUNTO,
-            year=year,
-            month=month,
-            filtered_partners=FILTERED_PARTNERS,
-            eligibility_rules=FAUSTO_ELIGIBILITY_RULES,
-            to_isolate_list=FAUSTO_TO_ISOLATE_LIST,
-            dict_partner_rename=FAUSTO_DICT_PARTNER_RENAME,
-            tasks=['Assistenza', 'Intervento'])
-        return {
-            'message': f'Riassunti generati per {year}-{month}',
-            'output_path': OUTPUT_RIASSUNTO
-        }
-    return _stream_script(run)
+    return _stream_worker({'kind': 'riassunti', 'year': year, 'month': month})
 
 
 # ── List projects (Peve + Fausto) ────────────────────────────────────────────
@@ -399,54 +404,23 @@ def example_timesheets():
 def generate_single():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    report_type  = data.get('report_type')
+    report_type   = data.get('report_type')
     task_category = data.get('task_category')
     partner_name  = data.get('partner_name')
     project_name  = data.get('project_name', '')
-    try:
-        pd.options.mode.chained_assignment = None
-        _ensure_csv_local(year, month)
-        if report_type == 'peve':
-            import generazione_rapportini_peve as gen
-            gen.create_rapportini(
-                path_source=EXPORT_PATH,
-                path_output=OUTPUT_PEVE,
-                year=year,
-                month=month,
-                filtered_partners=FILTERED_PARTNERS,
-                eligibility_rules=PEVE_ELIGIBILITY_RULES,
-                to_isolate_list=PEVE_TO_ISOLATE_LIST,
-                dict_partner_rename=PEVE_DICT_PARTNER_RENAME,
-                tasks=['Assistenza'],
-                only_task=task_category,
-                only_partner=partner_name,
-                only_project=project_name)
-            out_dir = OUTPUT_PEVE + f'{year}_{month}/'
-        elif report_type == 'fausto':
-            import generazione_rapportini_fausto as gen
-            gen.create_rapportini(
-                path_source=EXPORT_PATH,
-                path_output=OUTPUT_FAUSTO,
-                year=year,
-                month=month,
-                filtered_partners=FILTERED_PARTNERS,
-                eligibility_rules=FAUSTO_ELIGIBILITY_RULES,
-                to_isolate_list=FAUSTO_TO_ISOLATE_LIST,
-                dict_partner_rename=FAUSTO_DICT_PARTNER_RENAME,
-                tasks=['Assistenza', 'Intervento'],
-                only_task=task_category,
-                only_partner=partner_name,
-                only_project=project_name)
-            out_dir = OUTPUT_FAUSTO + f'{year}_{month}/'
-        else:
-            return jsonify({'success': False, 'message': f'Tipo sconosciuto: {report_type}'}), 400
-        return jsonify({
-            'success': True,
-            'message': f'Aggiornato: {task_category} – {partner_name}',
-            'output_path': out_dir,
-        })
-    except Exception:
-        return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+    if report_type not in ('peve', 'fausto'):
+        return jsonify({'success': False, 'message': f'Tipo sconosciuto: {report_type}'}), 400
+    # Run in the subprocess too — it invokes Spire.XLS, whose .NET heap would
+    # otherwise accumulate in the long-lived web worker (see _run_worker_streaming).
+    job = {'kind': 'single', 'year': year, 'month': month, 'report_type': report_type,
+           'task_category': task_category, 'partner_name': partner_name, 'project_name': project_name}
+    result = {'success': False, 'error': 'Nessun risultato.'}
+    for _message, res in _run_worker_streaming(job, progress_only=True):
+        if res is not None:
+            result = res
+    if result.get('success'):
+        return jsonify({'success': True, **(result.get('payload') or {})})
+    return jsonify({'success': False, 'message': result.get('error', 'Errore sconosciuto')}), 500
 
 
 # ── List riassunti files ──────────────────────────────────────────────────────
