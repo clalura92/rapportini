@@ -250,8 +250,11 @@ def _clean_spire_pdf(pdf_path):
     os.replace(tmp_path, pdf_path)
 
 
-def list_projects(path_source, year, month, eligibility_rules, to_isolate_list, dict_partner_rename, tasks):
-    df = load_df(path_source, year, month)
+def list_projects(path_source, year, month, eligibility_rules, to_isolate_list, dict_partner_rename, tasks, df=None):
+    # `df` lets the caller pass an already-parsed DataFrame so the CSV is read
+    # and parsed once even when listing both Peve and Fausto. We copy it because
+    # filter_employee_and_partners mutates the frame in place.
+    df = load_df(path_source, year, month) if df is None else df.copy()
     if df is None or df.empty:
         return []
     df = filter_employee_and_partners(df, eligibility_rules, dict_partner_rename, to_isolate_list)

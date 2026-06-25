@@ -60,6 +60,17 @@ def _get_year_month(data):
     return year, month
 
 
+# ── Projects cache ────────────────────────────────────────────────────────────
+# /api/projects parses the (potentially large) Odoo CSV for every tab open. The
+# result only changes when the month is re-downloaded from Odoo, so cache it in
+# memory keyed by (year, month) and invalidate on download.
+_PROJECTS_CACHE = {}
+
+
+def _invalidate_projects_cache(year, month):
+    _PROJECTS_CACHE.pop((str(year), str(month)), None)
+
+
 def _ensure_csv_local(year, month):
     """Download the Odoo CSV from Supabase if it's not already on local disk."""
     csv_name = f'{year}_{month}_timesheets_extraction.csv'
@@ -96,6 +107,7 @@ def download():
         msg = download_csv_from_odoo(
             ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD,
             year, month, EXPORT_PATH, export_name)
+        _invalidate_projects_cache(year, month)  # fresh CSV → stale cached projects
         return jsonify({'success': True, 'message': msg or 'Download completato', 'output_path': EXPORT_PATH})
     except Exception:
         return jsonify({'success': False, 'message': traceback.format_exc()}), 500
@@ -190,16 +202,24 @@ def generate_riassunti():
 def list_projects():
     year  = request.args.get('year',  str(datetime.now().year))
     month = request.args.get('month', str(datetime.now().month))
+
+    cached = _PROJECTS_CACHE.get((str(year), str(month)))
+    if cached is not None:
+        return jsonify({'success': True, 'projects': cached})
+
     try:
         pd.options.mode.chained_assignment = None
         _ensure_csv_local(year, month)
         import generazione_rapportini_peve as gen_a
         import generazione_rapportini_fausto as gen_f
+        # Parse the CSV once and share the DataFrame between both listings.
+        df_source = gen_a.load_df(EXPORT_PATH, year, month)
         projects = []
-        for p in gen_a.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza']):
+        for p in gen_a.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
             projects.append({**p, 'report_type': 'peve'})
-        for p in gen_f.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza', 'Intervento']):
+        for p in gen_f.list_projects(EXPORT_PATH, year, month, ELIGIBILITY_RULES, TO_ISOLATE_LIST, DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
             projects.append({**p, 'report_type': 'fausto'})
+        _PROJECTS_CACHE[(str(year), str(month))] = projects
         return jsonify({'success': True, 'projects': projects})
     except Exception:
         return jsonify({'success': False, 'message': traceback.format_exc()}), 500
