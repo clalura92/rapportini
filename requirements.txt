@@ -1,0 +1,10 @@
+flask
+gunicorn
+pandas
+numpy
+openpyxl
+spire.xls
+pymupdf
+requests
+python-dotenv
+supabase

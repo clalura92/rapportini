@@ -1,0 +1,32 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Output folders
+Output_Rapportini_Fausto/
+Output_Rapportini_Peve/
+Output_Riassunto/
+
+# Data exports
+Odoo exports/
+
+# Calibration artifacts
+calibrate_logo.xlsx
+calibrate_logo_multipage.xlsx
+test_logo_position.pdf
+
+# Claude internal
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

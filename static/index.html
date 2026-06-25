@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rapportini Generator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      color: #1a1a2e;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 16px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 36px;
+    }
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #0d47a1;
+      letter-spacing: -0.3px;
+    }
+    header p {
+      margin-top: 6px;
+      font-size: 0.9rem;
+      color: #555;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      padding: 28px 32px;
+      width: 100%;
+      max-width: 560px;
+      margin-bottom: 20px;
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #444;
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .card-tabs {
+      padding-top: 0;
+      overflow: hidden;
+    }
+
+    .tabs-header {
+      display: flex;
+      background: #f5f7fa;
+      border-bottom: 2px solid #e0e6ef;
+      margin: 0 -32px 24px;
+      padding: 0 16px;
+    }
+
+    .tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 14px 18px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #888;
+      cursor: pointer;
+      margin-bottom: -2px;
+      transition: color 0.15s, border-color 0.15s;
+      letter-spacing: 0.3px;
+    }
+    .tab:active { transform: none; }
+    .tab.active {
+      color: #0d47a1;
+      border-bottom-color: #0d47a1;
+      background: none;
+    }
+    .tab:hover:not(.active):not(:disabled) { color: #333; }
+
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    .period-row {
+      display: flex;
+      gap: 16px;
+      align-items: flex-end;
+    }
+
+    .field {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    input[type="number"] {
+      border: 1.5px solid #d0d7e2;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 1rem;
+      color: #1a1a2e;
+      outline: none;
+      transition: border-color 0.15s;
+      width: 100%;
+    }
+    input[type="number"]:focus {
+      border-color: #0d47a1;
+    }
+
+    .actions { display: flex; flex-direction: column; gap: 12px; }
+
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 14px 20px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.08s;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .btn-odoo    { background: #e8f0fe; color: #1a56db; }
+    .btn-odoo:hover:not(:disabled) { background: #d0e2ff; }
+
+    .btn-peve    { background: #0d47a1; color: #fff; }
+    .btn-peve:hover:not(:disabled) { background: #0a3880; }
+
+    .btn-fausto  { background: #1565c0; color: #fff; }
+    .btn-fausto:hover:not(:disabled) { background: #104e96; }
+
+    .btn-rias    { background: #283593; color: #fff; }
+    .btn-rias:hover:not(:disabled) { background: #1e2a72; }
+
+    .icon { font-size: 1.1rem; }
+
+    .status {
+      width: 100%;
+      max-width: 560px;
+      border-radius: 12px;
+      padding: 16px 20px;
+      font-size: 0.88rem;
+      line-height: 1.6;
+      display: none;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .status.success {
+      display: block;
+      background: #e6f4ea;
+      border: 1.5px solid #34a853;
+      color: #1e7e34;
+    }
+    .status.error {
+      display: block;
+      background: #fce8e6;
+      border: 1.5px solid #ea4335;
+      color: #c5221f;
+    }
+    .status.running {
+      display: block;
+      background: #e8f0fe;
+      border: 1.5px solid #4285f4;
+      color: #1a56db;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Rapportini Generator</h1>
+  <p>Solware — generazione rapportini e riassunti</p>
+</header>
+
+<div class="card">
+  <h2>Periodo di riferimento</h2>
+  <div class="period-row">
+    <div class="field">
+      <label for="year">Anno</label>
+      <input type="number" id="year" min="2020" max="2099" />
+    </div>
+    <div class="field">
+      <label for="month">Mese</label>
+      <input type="number" id="month" min="1" max="12" />
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Scarica dati</h2>
+  <div class="actions">
+    <button class="btn-odoo" onclick="run('download')">
+      <span class="icon">⬇️</span> Scarica da Odoo
+    </button>
+  </div>
+</div>
+
+<div class="card card-tabs">
+  <div class="tabs-header">
+    <button class="tab active" data-tab="riassunto">Riassunto</button>
+    <button class="tab" data-tab="fausto">Rapportini Fausto</button>
+    <button class="tab" data-tab="peve">Rapportini Peve</button>
+  </div>
+
+  <div class="tab-pane active" id="tab-riassunto">
+    <div class="actions">
+      <button class="btn-rias" onclick="run('riassunti')">
+        <span class="icon">📊</span> Genera Riassunto
+      </button>
+    </div>
+  </div>
+
+  <div class="tab-pane" id="tab-fausto">
+    <div class="actions">
+      <button class="btn-fausto" onclick="run('fausto')">
+        <span class="icon">📄</span> Genera Rapportini Fausto
+      </button>
+    </div>
+  </div>
+
+  <div class="tab-pane" id="tab-peve">
+    <div class="actions">
+      <button class="btn-peve" onclick="run('peve')">
+        <span class="icon">📄</span> Genera Rapportini Peve
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="status" class="status"></div>
+
+<script>
+  const now = new Date();
+  document.getElementById('year').value  = now.getFullYear();
+  document.getElementById('month').value = now.getMonth() + 1;
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  const ENDPOINTS = {
+    download:  '/api/download',
+    peve:      '/api/generate/peve',
+    fausto:    '/api/generate/fausto',
+    riassunti: '/api/generate/riassunti',
+  };
+
+  const LABELS = {
+    download:  'Download da Odoo',
+    peve:      'Rapportini Peve',
+    fausto:    'Rapportini Fausto',
+    riassunti: 'Riassunti',
+  };
+
+  function setStatus(cls, html) {
+    const el = document.getElementById('status');
+    el.className = 'status ' + cls;
+    el.innerHTML = html;
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function allButtons() {
+    return document.querySelectorAll('button:not(.tab)');
+  }
+
+  async function run(action) {
+    const year  = document.getElementById('year').value.trim();
+    const month = document.getElementById('month').value.trim();
+
+    if (!year || !month) {
+      setStatus('error', '⚠️ Inserisci anno e mese prima di procedere.');
+      return;
+    }
+
+    allButtons().forEach(b => b.disabled = true);
+    setStatus('running', `<span class="spinner"></span>&nbsp; ${LABELS[action]} in corso per ${year}-${month}…`);
+
+    try {
+      const res  = await fetch(ENDPOINTS[action], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ year: parseInt(year), month: parseInt(month) }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        const pathInfo = data.output_path ? `\nOutput: ${data.output_path}` : '';
+        setStatus('success', `✅ ${data.message}${pathInfo}`);
+      } else {
+        setStatus('error', `❌ Errore:\n${data.message}`);
+      }
+    } catch (err) {
+      setStatus('error', `❌ Errore di rete: ${err.message}`);
+    } finally {
+      allButtons().forEach(b => b.disabled = false);
+    }
+  }
+</script>
+</body>
+</html>
