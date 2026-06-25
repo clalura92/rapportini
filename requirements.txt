@@ -3,6 +3,7 @@ gunicorn
 pandas
 numpy
 openpyxl
+Pillow
 spire.xls
 pymupdf
 requests
