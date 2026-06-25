@@ -2,6 +2,7 @@ import xmlrpc.client as xmlrpc_client
 import pandas as pd
 import os
 import glob
+import calendar
 
 
 def load_from_odoo(url, db, username, password, year, month):
@@ -30,13 +31,20 @@ def load_from_odoo(url, db, username, password, year, month):
         'write_date'
     ]
     
-    filters = [[['is_timesheet', '=', True], ['id', '>', 40000]]]
-    filters_all = [[['id', '>', 40000]]]
-    
+    last_day = calendar.monthrange(int(year), int(month))[1]
+    date_from = f'{int(year)}-{int(month):02d}-01'
+    date_to = f'{int(year)}-{int(month):02d}-{last_day}'
+
+    filters = [[
+        ['is_timesheet', '=', True],
+        ['id', '>', 40000],
+        ['date', '>=', date_from],
+        ['date', '<=', date_to],
+    ]]
+
     print("2/4 - Download from Odoo started...")
-    print("\r", end='') 
-    
-    items_source = models.execute_kw(db, uid, password, 'account.analytic.line', 'search_read', filters, {'limit': 10})
+    print("\r", end='')
+
     items = models.execute_kw(db, uid, password, 'account.analytic.line', 'search_read', filters, {'fields': fields})
     df = pd.DataFrame.from_dict(items)
 
