@@ -3,7 +3,7 @@ services:
     name: rapportini
     runtime: python
     buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --timeout 300
     envVars:
       - key: GEMINI_API_KEY
         sync: false
