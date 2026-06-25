@@ -304,7 +304,7 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
                 print('worksheet copied')
                 ws = wb.worksheets[-1]
                 print('template sheet removed')
-                ws.title = re.split(r"[ ]", partner)[0] + ('-' if project != '' else '') + project        
+                ws.title = (re.split(r"[ ]", partner)[0] + ('-' if project != '' else '') + project)[:31]
                 ws.sheet_view.showGridLines = False
                 print('title and sheet view changed')
 

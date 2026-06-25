@@ -348,7 +348,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             wb.copy_worksheet(ws)
             ws = wb.worksheets[-1]
             ws.sheet_view.showGridLines = False
-            ws.title = re.split(r"[ ]", partner)[0] + ('-' if project != '' else '') + project
+            ws.title = (re.split(r"[ ]", partner)[0] + ('-' if project != '' else '') + project)[:31]
             print(f'{task_category} - {partner} - {project} - {flag_to_isolate} - Sheet copiato e titolo cambiato')
 
             row_start = 13

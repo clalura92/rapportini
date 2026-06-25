@@ -374,7 +374,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             ws = wb.worksheets[-1]
             print('template sheet removed')
             ws.sheet_view.showGridLines = False
-            ws.title = re.split(r"[ ]", partner)[0] + ('-' if project != '' else '') + project        
+            ws.title = (re.split(r"[ ]", partner)[0] + ('-' if project != '' else '') + project)[:31]
             print('title and sheet view changed')
 
             row_start = 13
