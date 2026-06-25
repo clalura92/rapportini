@@ -75,7 +75,7 @@ def load_df(path_output, year, month):
     print("DEBUG: Extracting names via Regex...")
     df['employee_name'] = df['employee_id'].apply(lambda x: get_match(x, ", '(.*) - "))
     df['partner_name'] = df['partner_id'].apply(lambda x: string.capwords(get_match(x.replace('"', "'"), ", '(.*)']")))
-    df['project_name_orig'] = df['project_id'].apply(lambda x: get_match(x, " - (.*) \[",))
+    df['project_name_orig'] = df['project_id'].apply(lambda x: get_match(x, r" - (.*) \[",))
 
     print("DEBUG: Filtering tasks...")
     valid_tasks = ['Intervento', 'Viaggio', 'Assistenza']

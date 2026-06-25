@@ -74,7 +74,7 @@ def load_df(path_output, eligibility_rules, year, month):
         df = filter_employees(df, eligibility_rules)
         
         df['partner_name'] = df['partner_id'].apply(lambda x: string.capwords(re.search(", '(.*)']", x.replace('"',"'")).group(1)))
-        df['project_name_orig'] = df['project_id'].apply(lambda x: re.search(" - (.*) \[", x).group(1))
+        df['project_name_orig'] = df['project_id'].apply(lambda x: re.search(r" - (.*) \[", x).group(1))
         print('... Estrazione employee, partner e project name fatta')
     
         df['hour_start'] = df.apply(lambda x: x['date_start'].strftime('%H:%M'), axis=1)
