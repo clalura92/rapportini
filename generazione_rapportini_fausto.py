@@ -32,6 +32,8 @@ import shutil
 import glob
 import gc
 
+import memlog
+
 
 def is_daylight(date):
     # Last Sunday of March and last Sunday of October (EU DST rules)
@@ -313,10 +315,13 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
 
     out_dir = path_output + str(year) + '_' + str(month) + '/'
 
+    memlog.snapshot('fausto create_rapportini: before load_df')
     df_SOURCE = load_df(path_source, year, month)
+    memlog.snapshot(f'fausto: after load_df (rows={0 if df_SOURCE is None else len(df_SOURCE)})')
     df_all = filter_employee_and_partners(df_SOURCE, eligibility_rules, dict_partner_rename, to_isolate_list)
     df_all = identify_suspicious_data(df_all)
     df_all = df_all[df_all['flag_suspicious'] == False].copy()
+    memlog.snapshot(f'fausto: after filters (rows={len(df_all)})')
     print(f'df_all after suspicious filter: {df_all.shape}')
     
     for task_category in ['Assistenza', 'Intervento']:
@@ -354,6 +359,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             print(f'@@PROGRESS@@\x1f{progress_done}\x1f{total_to_process}\x1f{task_category} · {partner} - {project}')
             print(f'Inizio {task_category} - {partner} - {project} ')
             print('df pre filter: ',df_all.shape)
+            memlog.snapshot(f'fausto [{progress_done}/{total_to_process}] START {task_category} {partner} / {project}')
 
             wb = load_workbook(template_name)
             ws = wb.active
@@ -521,6 +527,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             wb.close()
             del wb
             print('sheet closed')
+            memlog.snapshot(f'fausto [{progress_done}/{total_to_process}] xlsx saved+closed, before Spire PDF')
 
             # Convert this partner's workbook to PDF right away, then release
             # everything before moving to the next partner. Spire loads the whole
@@ -532,7 +539,9 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             try:
                 wb_pdf = spire.Workbook()
                 wb_pdf.LoadFromFile(xlsx_path)
+                memlog.snapshot(f'fausto [{progress_done}/{total_to_process}] Spire LoadFromFile done')
                 wb_pdf.SaveToFile(pdf_path, spire.FileFormat.PDF)
+                memlog.snapshot(f'fausto [{progress_done}/{total_to_process}] Spire SaveToFile(PDF) done')
                 wb_pdf.Dispose()
                 del wb_pdf
                 _clean_spire_pdf(pdf_path)
@@ -548,6 +557,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
                 print(f'Spire PDF failed for {xlsx_name}, skipping: {spire_err}')
             finally:
                 gc.collect()
+                memlog.snapshot(f'fausto [{progress_done}/{total_to_process}] END (after Dispose+gc.collect)')
 
     print(glob.glob('*'))
     print(glob.glob(path_output+'/*'))

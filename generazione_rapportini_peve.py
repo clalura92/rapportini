@@ -33,6 +33,8 @@ import shutil
 import glob
 import gc
 
+import memlog
+
 
 def is_daylight(date):
     start = datetime.strptime("31-03-2024", "%d-%m-%Y")
@@ -288,8 +290,11 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
 
     out_dir = path_output + str(year) + '_' + str(month) + '/'
 
+    memlog.snapshot('peve create_rapportini: before load_df')
     df_SOURCE = load_df(path_source, year, month)
+    memlog.snapshot(f'peve: after load_df (rows={0 if df_SOURCE is None else len(df_SOURCE)})')
     df_all = filter_employee_and_partners(df_SOURCE, eligibility_rules, dict_partner_rename, to_isolate_list)
+    memlog.snapshot(f'peve: after filter_employee_and_partners (rows={len(df_all)})')
     print(df_all.shape)
 
     for task_category in ['Assistenza', ]:
@@ -324,6 +329,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             # Sentinel line the backend turns into a "Elaborazione N/M" counter.
             print(f'@@PROGRESS@@\x1f{progress_done}\x1f{total_to_process}\x1f{task_category} · {partner} - {project}')
             print(f'{task_category} - {partner} - {project} - {flag_to_isolate} - Inizio elaborazione')
+            memlog.snapshot(f'peve [{progress_done}/{total_to_process}] START {partner} / {project}')
 
             wb = load_workbook(template_name)
             ws = wb.active
@@ -465,6 +471,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             wb.close()
             del wb
             print('sheet closed')
+            memlog.snapshot(f'peve [{progress_done}/{total_to_process}] xlsx saved+closed, before Spire PDF')
 
             # Convert this partner's workbook to PDF right away, then release
             # everything before moving to the next partner. Spire loads the whole
@@ -476,7 +483,9 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
             try:
                 wb_pdf = spire.Workbook()
                 wb_pdf.LoadFromFile(xlsx_path)
+                memlog.snapshot(f'peve [{progress_done}/{total_to_process}] Spire LoadFromFile done')
                 wb_pdf.SaveToFile(pdf_path, spire.FileFormat.PDF)
+                memlog.snapshot(f'peve [{progress_done}/{total_to_process}] Spire SaveToFile(PDF) done')
                 wb_pdf.Dispose()
                 del wb_pdf
                 _clean_spire_pdf(pdf_path)
@@ -492,6 +501,7 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
                 print(f'Spire PDF failed for {xlsx_name}, skipping: {spire_err}')
             finally:
                 gc.collect()
+                memlog.snapshot(f'peve [{progress_done}/{total_to_process}] END (after Dispose+gc.collect)')
 
     print(glob.glob('*'))
     print(glob.glob(path_output + '/*'))

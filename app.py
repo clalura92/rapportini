@@ -19,6 +19,9 @@ from flask import Flask, jsonify, request, send_file, send_from_directory, Respo
 from storage import download_to_bytes, list_prefix, to_storage_key
 import report_config as cfg
 
+import memlog
+memlog.init('web')
+
 load_dotenv()
 
 # In dev: Vite runs on :5173 and proxies /api/* here.
@@ -108,7 +111,9 @@ def _warm_all_local_months():
             _warm_projects_cache(m.group(1), m.group(2))
 
 
+memlog.snapshot('web: before _warm_all_local_months (eager projects cache)')
 _warm_all_local_months()
+memlog.snapshot(f'web: after _warm_all_local_months (cached months={len(_PROJECTS_CACHE)})')
 
 
 # ── Live progress streaming ───────────────────────────────────────────────────
@@ -231,12 +236,16 @@ def _run_worker_streaming(job, progress_only=True):
     os.close(fd)
     job = {**job, 'result_path': result_path}
 
+    memlog.snapshot(f"web: about to spawn worker for kind={job.get('kind')} "
+                    f"{job.get('year')}-{job.get('month')}")
     env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
     proc = subprocess.Popen(
         [sys.executable, '-u', _WORKER_SCRIPT],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding='utf-8', errors='replace', env=env, cwd=_ROOT,
     )
+    memlog.snapshot(f'web: worker spawned pid={proc.pid} (web RSS now is the '
+                    f'resident baseline the child STACKS ON TOP of)')
     proc.stdin.write(json.dumps(job))
     proc.stdin.close()
 
@@ -248,6 +257,8 @@ def _run_worker_streaming(job, progress_only=True):
         elif not progress_only and not _is_progress_noise(line):
             yield line, None
     proc.wait()
+    memlog.snapshot(f'web: worker pid={proc.pid} exited rc={proc.returncode} '
+                    '(child memory now reclaimed by OS)')
 
     try:
         with open(result_path, 'r', encoding='utf-8') as f:
@@ -260,6 +271,13 @@ def _run_worker_streaming(job, progress_only=True):
             os.remove(result_path)
         except OSError:
             pass
+    # rc=-9 / no result file usually means the OS (or Render) SIGKILLed the child
+    # — the classic OOM signature. Make that explicit on the shared timeline.
+    if proc.returncode and proc.returncode < 0:
+        memlog.note(f'web: WARNING worker pid={proc.pid} killed by signal '
+                    f'{-proc.returncode} (negative rc) — likely OOM SIGKILL')
+    memlog.snapshot(f"web: worker result success={result.get('success')} "
+                    f"worker_peak={result.get('worker_peak_mb')}MB")
     yield None, result
 
 
@@ -707,6 +725,50 @@ def chat_revert():
         return jsonify({'success': False, 'message': str(e)}), 404
     except Exception:
         return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+
+
+# ── Memory diagnostics ────────────────────────────────────────────────────────
+# Reproduce the OOM, then GET /api/debug/memlog and send me the whole output.
+# The cg=USED/LIMIT column is the total memory of EVERY process in the Render
+# instance vs the 512MB hard cap — when it approaches the limit, the next
+# allocation is what triggers the kill.
+@app.route('/api/debug/memlog', methods=['GET'])
+def debug_memlog():
+    # Capture the current web-worker state first so the file ends with a
+    # fresh data point, then return the whole shared timeline as plain text.
+    memlog.snapshot('web: /api/debug/memlog requested (current web state)')
+    try:
+        with open(memlog.LOG_PATH, 'r', encoding='utf-8') as f:
+            body = f.read()
+    except FileNotFoundError:
+        body = '(no memlog file yet — generate a report first)\n'
+    return Response(body, mimetype='text/plain; charset=utf-8')
+
+
+@app.route('/api/debug/meminfo', methods=['GET'])
+def debug_meminfo():
+    memlog.snapshot('web: /api/debug/meminfo requested')
+    cg_used, cg_limit = memlog._read_cgroup_mb()
+    return jsonify({
+        'success': True,
+        'web_rss_mb': round(memlog._rss_mb() or 0, 1),
+        'web_peak_mb': round(memlog.peak_mb(), 1),
+        'cgroup_used_mb': round(cg_used, 1) if cg_used is not None else None,
+        'cgroup_limit_mb': round(cg_limit, 1) if cg_limit is not None else None,
+        'host_avail_mb': round(memlog._sys_avail_mb() or 0, 1),
+        'web_concurrency': os.environ.get('WEB_CONCURRENCY'),
+        'log_path': memlog.LOG_PATH,
+    })
+
+
+@app.route('/api/debug/memlog/clear', methods=['POST', 'GET'])
+def debug_memlog_clear():
+    try:
+        open(memlog.LOG_PATH, 'w').close()
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+    memlog.snapshot('web: memlog cleared — starting a clean repro run')
+    return jsonify({'success': True, 'message': 'memlog cleared'})
 
 
 if __name__ == '__main__':

@@ -31,6 +31,9 @@ test_logo_position.pdf
 # Claude internal
 .claude/
 
+# Memory diagnostics log (runtime artifact)
+rapportini_memlog.log
+
 # OS
 .DS_Store
 Thumbs.db

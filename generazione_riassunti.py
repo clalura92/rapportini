@@ -29,6 +29,8 @@ import shutil
 import glob
 import gc
 
+import memlog
+
 
 def is_daylight(date):
     start = datetime.strptime("31-03-2024", "%d-%m-%Y")
@@ -243,15 +245,19 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
         create_folders(path_output, str(year), str(month),  'Fausto')
         print('Post - create folders')
         
+        memlog.snapshot('riassunti create_riassunto: before load_df')
         df_SOURCE = load_df(path_source, eligibility_rules, year, month)
+        memlog.snapshot(f'riassunti: after load_df (rows={0 if df_SOURCE is None else len(df_SOURCE)})')
         df_all = filter_partners(df_SOURCE, eligibility_rules, dict_partner_rename, to_isolate_list)
-        #df_all = filter_employee_and_partners(df_SOURCE, eligibility_rules, dict_partner_rename, to_isolate_list)  
+        #df_all = filter_employee_and_partners(df_SOURCE, eligibility_rules, dict_partner_rename, to_isolate_list)
+        memlog.snapshot(f'riassunti: after filter_partners (rows={len(df_all)})')
         print(df_all.shape)
-        
+
         for task_category in ['Assistenza', 'Intervento']:
             print('')
             print('')
             print(task_category)
+            memlog.snapshot(f'riassunti: task_category={task_category} START')
         
             #print('df pre partner filter: ',df.shape)
             #if len(filtered_partners) > 0:
@@ -286,6 +292,7 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
                 print(f'@@PROGRESS@@\x1f{progress_done}\x1f{total_to_process}\x1f{task_category} · {partner} - {project}')
                 print(f'Inizio {task_category} - {partner} - {project} ')
                 print('df pre filter: ',df_all.shape)
+                memlog.snapshot(f'riassunti [{progress_done}/{total_to_process}] {task_category} {partner} / {project}')
 
                 df = filter_df(df = df_all,
                             employees = employees,
@@ -401,9 +408,12 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
             # by design, so it can't be split per partner like the Peve files.
             try:
                 print('start of spire.Workbook')
+                memlog.snapshot(f'riassunti {task_category}: before Spire conversion')
                 workbook = spire.Workbook()
                 workbook.LoadFromFile(xlsx_abs)
+                memlog.snapshot(f'riassunti {task_category}: Spire LoadFromFile done')
                 workbook.SaveToFile(xls_abs, ExcelVersion.Version97to2003)
+                memlog.snapshot(f'riassunti {task_category}: Spire SaveToFile done')
                 workbook.Dispose()
                 del workbook
                 os.remove(month_dir + name_file_riassunto)
@@ -425,6 +435,7 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
                     print(f'Supabase upload failed (non-fatal): {sup_err}')
             finally:
                 gc.collect()
+                memlog.snapshot(f'riassunti {task_category}: END (after Dispose+gc.collect)')
 
     except Exception as e:
         print(f"Error in create_riassunto: ", e)
