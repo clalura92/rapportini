@@ -44,6 +44,21 @@ def upload_file(local_path: str, storage_key: str) -> None:
         bucket.upload(storage_key, data)
 
 
+def upload_and_remove(local_path: str, storage_key: str) -> None:
+    """Upload a file to Supabase, then delete the local copy.
+
+    On Render's free tier the output dirs live under /tmp, which is a tmpfs —
+    i.e. RAM that counts against the 512MB instance cap. Generated xlsx/pdf
+    files left there accumulate and eat the memory budget across a session, so
+    once a file is safely in Supabase (the source of truth that serve_pdf and
+    ai_chat both read from) we remove it locally to keep tmpfs near-empty."""
+    upload_file(local_path, storage_key)
+    try:
+        os.remove(local_path)
+    except OSError:
+        pass
+
+
 def download_to_bytes(storage_key: str) -> bytes:
     """Download a file from Supabase Storage into memory."""
     sb = _client()

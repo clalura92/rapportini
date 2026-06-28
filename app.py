@@ -73,19 +73,18 @@ _PROJECTS_CACHE = {}
 
 
 def _build_projects(year, month):
-    """Parse the CSV once and build the combined Peve + Fausto project list."""
-    pd.options.mode.chained_assignment = None
-    _ensure_csv_local(year, month)
-    import generazione_rapportini_peve as gen_a
-    import generazione_rapportini_fausto as gen_f
-    # Parse the CSV once and share the DataFrame between both listings.
-    df_source = gen_a.load_df(EXPORT_PATH, year, month)
-    projects = []
-    for p in gen_a.list_projects(EXPORT_PATH, year, month, PEVE_ELIGIBILITY_RULES, PEVE_TO_ISOLATE_LIST, PEVE_DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
-        projects.append({**p, 'report_type': 'peve'})
-    for p in gen_f.list_projects(EXPORT_PATH, year, month, FAUSTO_ELIGIBILITY_RULES, FAUSTO_TO_ISOLATE_LIST, FAUSTO_DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
-        projects.append({**p, 'report_type': 'fausto'})
-    return projects
+    """Build the combined Peve + Fausto project list IN THE SUBPROCESS.
+
+    Listing projects parses the CSV with generazione_rapportini_*, which import
+    Spire/fitz and load the .NET CLR. Importing those here would pin ~100MB in
+    the long-lived web worker forever. Instead we run it as a 'projects' job in
+    the short-lived child (which exits and releases everything) and keep only
+    the small JSON list in web memory."""
+    result = _run_worker_blocking({'kind': 'projects',
+                                   'year': str(year), 'month': str(month)})
+    if not result.get('success'):
+        raise RuntimeError(result.get('error', 'projects build failed'))
+    return (result.get('payload') or {}).get('projects', [])
 
 
 def _warm_projects_cache(year, month):
@@ -97,23 +96,10 @@ def _warm_projects_cache(year, month):
         _PROJECTS_CACHE.pop((str(year), str(month)), None)
 
 
-def _warm_all_local_months():
-    """At worker boot, eagerly build the cache for every month whose CSV is
-    already present on local disk."""
-    try:
-        names = os.listdir(EXPORT_PATH)
-    except OSError:
-        return  # EXPORT_PATH doesn't exist yet (e.g. cold start on Render)
-    pat = re.compile(r'^(\d{4})_(\d{1,2})_timesheets_extraction\.csv$')
-    for name in names:
-        m = pat.match(name)
-        if m:
-            _warm_projects_cache(m.group(1), m.group(2))
-
-
-memlog.snapshot('web: before _warm_all_local_months (eager projects cache)')
-_warm_all_local_months()
-memlog.snapshot(f'web: after _warm_all_local_months (cached months={len(_PROJECTS_CACHE)})')
+# NOTE: we deliberately do NOT warm the cache at boot anymore. Eager warming
+# spawned a heavy CSV parse the moment the worker started; now the cache is
+# built lazily on the first /api/projects request (and refreshed after each
+# download), so the web worker boots light and stays light.
 
 
 # ── Live progress streaming ───────────────────────────────────────────────────
@@ -279,6 +265,17 @@ def _run_worker_streaming(job, progress_only=True):
     memlog.snapshot(f"web: worker result success={result.get('success')} "
                     f"worker_peak={result.get('worker_peak_mb')}MB")
     yield None, result
+
+
+def _run_worker_blocking(job):
+    """Run a worker job to completion (no streaming) and return its
+    {'success', 'payload'|'error'} result. Used for non-SSE callers like the
+    projects-list build."""
+    result = {'success': False, 'error': 'Nessun risultato.'}
+    for _message, res in _run_worker_streaming(job, progress_only=True):
+        if res is not None:
+            result = res
+    return result
 
 
 def _stream_worker(job, progress_only=True, on_success=None):

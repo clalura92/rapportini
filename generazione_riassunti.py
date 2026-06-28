@@ -419,8 +419,10 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
                 os.remove(month_dir + name_file_riassunto)
                 print(f'Riassunto XLS saved: {xls_abs}')
                 try:
-                    from storage import upload_file, to_storage_key
-                    upload_file(xls_abs, to_storage_key(xls_abs))
+                    from storage import upload_and_remove, to_storage_key
+                    # /tmp is RAM-backed tmpfs on Render — drop the local copy
+                    # once it's safely in Supabase to keep tmpfs near-empty.
+                    upload_and_remove(xls_abs, to_storage_key(xls_abs))
                     print(f'Uploaded to Supabase: {to_storage_key(xls_abs)}')
                 except Exception as sup_err:
                     print(f'Supabase upload failed (non-fatal): {sup_err}')
@@ -428,8 +430,8 @@ def create_riassunto(path_source, path_output, year, month, filtered_partners, e
                 print(f'Spire conversion failed, keeping .xlsx: {spire_err}')
                 print(f'Riassunto XLSX saved: {xlsx_abs}')
                 try:
-                    from storage import upload_file, to_storage_key
-                    upload_file(xlsx_abs, to_storage_key(xlsx_abs))
+                    from storage import upload_and_remove, to_storage_key
+                    upload_and_remove(xlsx_abs, to_storage_key(xlsx_abs))
                     print(f'Uploaded to Supabase: {to_storage_key(xlsx_abs)}')
                 except Exception as sup_err:
                     print(f'Supabase upload failed (non-fatal): {sup_err}')

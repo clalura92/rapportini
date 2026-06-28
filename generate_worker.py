@@ -45,6 +45,27 @@ def _run(job):
     cfg.ensure_csv_local(year, month)
     memlog.snapshot('after ensure_csv_local')
 
+    if kind == 'projects':
+        # Listing projects parses the CSV with the same heavy modules that load
+        # the .NET CLR. Doing it HERE (in the short-lived child) instead of in
+        # app.py keeps Spire/fitz out of the long-lived web worker entirely —
+        # the web process only ever holds the small JSON result.
+        import generazione_rapportini_peve as gen_a
+        import generazione_rapportini_fausto as gen_f
+        memlog.snapshot('projects: gen modules imported')
+        df_source = gen_a.load_df(cfg.EXPORT_PATH, year, month)
+        projects = []
+        for p in gen_a.list_projects(cfg.EXPORT_PATH, year, month,
+                                     cfg.PEVE_ELIGIBILITY_RULES, cfg.PEVE_TO_ISOLATE_LIST,
+                                     cfg.PEVE_DICT_PARTNER_RENAME, ['Assistenza'], df=df_source):
+            projects.append({**p, 'report_type': 'peve'})
+        for p in gen_f.list_projects(cfg.EXPORT_PATH, year, month,
+                                     cfg.FAUSTO_ELIGIBILITY_RULES, cfg.FAUSTO_TO_ISOLATE_LIST,
+                                     cfg.FAUSTO_DICT_PARTNER_RENAME, ['Assistenza', 'Intervento'], df=df_source):
+            projects.append({**p, 'report_type': 'fausto'})
+        memlog.snapshot(f'projects: built {len(projects)} entries')
+        return {'projects': projects}
+
     if kind == 'peve':
         import generazione_rapportini_peve as gen
         memlog.snapshot('after import generazione_rapportini_peve (spire/fitz/openpyxl loaded)')

@@ -491,9 +491,11 @@ def create_rapportini(path_source, path_output, year, month, filtered_partners, 
                 _clean_spire_pdf(pdf_path)
                 print(f'PDF generated: {pdf_path}')
                 try:
-                    from storage import upload_file, to_storage_key
-                    upload_file(xlsx_path, to_storage_key(xlsx_path))
-                    upload_file(pdf_path,  to_storage_key(pdf_path))
+                    from storage import upload_and_remove, to_storage_key
+                    # Upload then delete the local copies: /tmp is RAM-backed
+                    # tmpfs on Render and counts against the 512MB cap.
+                    upload_and_remove(xlsx_path, to_storage_key(xlsx_path))
+                    upload_and_remove(pdf_path,  to_storage_key(pdf_path))
                     print(f'Uploaded to Supabase: {to_storage_key(xlsx_path)}')
                 except Exception as sup_err:
                     print(f'Supabase upload failed (non-fatal): {sup_err}')
