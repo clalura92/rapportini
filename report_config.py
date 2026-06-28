@@ -61,6 +61,26 @@ PEVE_DICT_PARTNER_RENAME = {
 
 FILTERED_PARTNERS = []
 
+# ── Odoo credentials ──────────────────────────────────────────────────────────
+# Shared by the web app (app.py) and the worker (generate_worker.py) so the fresh
+# download that precedes every generation uses the same connection settings.
+ODOO_URL      = os.environ.get('ODOO_URL',      'https://solware.odoo.com')
+ODOO_DB       = os.environ.get('ODOO_DB',       'dueesseti-solware1-main-7378424')
+ODOO_USERNAME = os.environ.get('ODOO_USERNAME', 'fausto.luraschi@solware.it')
+ODOO_PASSWORD = os.environ.get('ODOO_PASSWORD', 'Fausto@6148')
+
+
+def download_fresh_csv(year, month):
+    """Download the month's timesheets straight from Odoo and write the CSV to
+    EXPORT_PATH (also uploading to Supabase). Run before every report generation
+    so reports always reflect live Odoo data — there is no separate manual
+    "download" step anymore."""
+    from download_from_odoo import download_csv_from_odoo
+    export_name = f'{year}_{month}_timesheets_extraction.csv'
+    return download_csv_from_odoo(
+        ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD,
+        year, month, EXPORT_PATH, export_name)
+
 
 def ensure_csv_local(year, month):
     """Download the Odoo CSV from Supabase if it's not already on local disk."""

@@ -42,8 +42,15 @@ def _run(job):
     year  = job['year']
     month = job['month']
     memlog.snapshot(f'_run begin kind={kind} {year}-{month}')
-    cfg.ensure_csv_local(year, month)
-    memlog.snapshot('after ensure_csv_local')
+    # The "Genera rapportini" actions always pull a fresh Odoo export first, so
+    # reports reflect live data without a separate manual download step. Listing
+    # projects / regenerating a single report reuse whatever CSV is already local.
+    if kind in ('peve', 'fausto', 'riassunti'):
+        cfg.download_fresh_csv(year, month)
+        memlog.snapshot('after download_fresh_csv')
+    else:
+        cfg.ensure_csv_local(year, month)
+        memlog.snapshot('after ensure_csv_local')
 
     if kind == 'projects':
         # Listing projects parses the CSV with the same heavy modules that load

@@ -1,5 +1,4 @@
 const ACTION_META = {
-  download:  { label: 'Scarica da Odoo',    icon: '⬇️', cls: 'btn-download'  },
   peve:      { label: 'Rapportini Peve',    icon: '📄', cls: 'btn-peve'      },
   fausto:    { label: 'Rapportini Fausto',  icon: '📄', cls: 'btn-fausto'    },
   riassunti: { label: 'Riassunti',          icon: '📊', cls: 'btn-riassunti' },
@@ -31,33 +30,19 @@ function ActionButton({ action, busy, lastStatus, onClick }) {
 
 export default function ActionPanel({ busy, lastResults, onAction }) {
   return (
-    <>
-      <div className="card">
-        <div className="card-title">Scarica dati</div>
-        <div className="actions">
+    <div className="card">
+      <div className="card-title">Genera rapportini</div>
+      <div className="actions">
+        {['peve', 'fausto', 'riassunti'].map(action => (
           <ActionButton
-            action="download"
+            key={action}
+            action={action}
             busy={busy}
-            lastStatus={lastResults.download}
+            lastStatus={lastResults[action]}
             onClick={onAction}
           />
-        </div>
+        ))}
       </div>
-
-      <div className="card">
-        <div className="card-title">Genera rapportini</div>
-        <div className="actions">
-          {['peve', 'fausto', 'riassunti'].map(action => (
-            <ActionButton
-              key={action}
-              action={action}
-              busy={busy}
-              lastStatus={lastResults[action]}
-              onClick={onAction}
-            />
-          ))}
-        </div>
-      </div>
-    </>
+    </div>
   )
 }

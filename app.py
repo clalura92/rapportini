@@ -7,6 +7,7 @@ import tempfile
 import threading
 import traceback
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import pandas as pd
@@ -475,20 +476,31 @@ def list_riassunti():
 @app.route('/api/riassunto/zip', methods=['GET'])
 def zip_riassunti():
     storage_prefix = 'Output_Riassunto'
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        period_entries = list_prefix(storage_prefix)
-        for entry in sorted(period_entries, key=lambda e: e.get('name', '')):
-            if entry.get('id') is not None:
+    # Collect every (arcname, storage_key) pair first, then fetch concurrently.
+    keys = []
+    for entry in sorted(list_prefix(storage_prefix), key=lambda e: e.get('name', '')):
+        if entry.get('id') is not None:
+            continue
+        period_dir = entry['name']
+        file_entries = list_prefix(f'{storage_prefix}/{period_dir}')
+        for fe in sorted(file_entries, key=lambda e: e.get('name', '')):
+            if fe.get('id') is None:
                 continue
-            period_dir = entry['name']
-            file_entries = list_prefix(f'{storage_prefix}/{period_dir}')
-            for fe in sorted(file_entries, key=lambda e: e.get('name', '')):
-                if fe.get('id') is None:
-                    continue
-                fname = fe['name']
-                file_data = download_to_bytes(f'{storage_prefix}/{period_dir}/{fname}')
-                zf.writestr(os.path.join(period_dir, fname), file_data)
+            fname = fe['name']
+            keys.append((os.path.join(period_dir, fname),
+                         f'{storage_prefix}/{period_dir}/{fname}'))
+
+    def _fetch(item):
+        arcname, key = item
+        return arcname, download_to_bytes(key)
+
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        results = list(ex.map(_fetch, keys))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
+        for arcname, file_data in results:
+            zf.writestr(arcname, file_data)
     buf.seek(0)
     return send_file(buf, mimetype='application/zip', as_attachment=True,
                      download_name='Riassunti.zip')
@@ -508,14 +520,23 @@ def zip_rapportini():
         zip_name = f'Rapportini_Fausto_{year}_{month}.zip'
     else:
         return jsonify({'success': False, 'message': f'Tipo sconosciuto: {report_type}'}), 400
+    entries = list_prefix(storage_prefix)
+    names = sorted(fe['name'] for fe in entries if fe.get('id') is not None)
+
+    # Fetch files concurrently: each download is an independent network
+    # round-trip to Supabase, so doing them sequentially made the zip take
+    # ~1 minute for a typical month. A thread pool overlaps the waits.
+    def _fetch(fname):
+        return fname, download_to_bytes(f'{storage_prefix}/{fname}')
+
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        results = list(ex.map(_fetch, names))
+
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        entries = list_prefix(storage_prefix)
-        for fe in sorted(entries, key=lambda e: e.get('name', '')):
-            if fe.get('id') is None:
-                continue
-            fname = fe['name']
-            file_data = download_to_bytes(f'{storage_prefix}/{fname}')
+    # ZIP_STORED (no compression): the payload is PDF/XLSX, both already
+    # compressed, so deflating only burns CPU for ~no size gain.
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
+        for fname, file_data in results:
             zf.writestr(fname, file_data)
     buf.seek(0)
     return send_file(buf, mimetype='application/zip', as_attachment=True,

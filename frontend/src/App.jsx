@@ -12,7 +12,6 @@ const now = new Date()
 let nextId = 1
 
 const ACTION_LABELS = {
-  download:  'Download da Odoo',
   peve:      'Generazione rapportini Peve',
   fausto:    'Generazione rapportini Fausto',
   riassunti: 'Generazione riassunti',
@@ -57,7 +56,6 @@ export default function App() {
     const onProgress = (msg) => updateLastLog({ message: msg })
 
     const apiCall = {
-      download:   () => api.download(year, month, onProgress),
       peve:       () => api.generatePeve(year, month, onProgress),
       fausto:     () => api.generateFausto(year, month, onProgress),
       riassunti:  () => api.generateRiassunti(year, month, onProgress),
@@ -68,9 +66,10 @@ export default function App() {
       const status = data.success ? 'success' : 'error'
       updateLastLog({ status, message: data.message, outputPath: data.output_path ?? null })
       setLastResults(prev => ({ ...prev, [action]: status }))
-      // A fresh Odoo download changes the project list — drop the stale cache
-      // and re-warm so the Progetti tab reflects the new data.
-      if (action === 'download' && status === 'success') {
+      // Every generation now pulls a fresh Odoo export first, so the project
+      // list may have changed — drop the stale cache and re-warm so the Progetti
+      // tab reflects the new data.
+      if (status === 'success') {
         api.invalidateProjects(year, month)
         api.prefetchProjects(year, month)
       }

@@ -1,11 +1,19 @@
 import os
 from supabase import create_client
 
+_cached_client = None
+
 
 def _client():
-    url = os.environ['SUPABASE_URL']
-    key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-    return create_client(url, key)
+    # Reuse a single client (and its underlying HTTP connection pool) across
+    # calls. Rebuilding it per download forced a fresh TLS handshake every
+    # file, which dominated the runtime of bulk operations like the zip export.
+    global _cached_client
+    if _cached_client is None:
+        url = os.environ['SUPABASE_URL']
+        key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+        _cached_client = create_client(url, key)
+    return _cached_client
 
 
 def _bucket():
