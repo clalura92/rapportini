@@ -481,11 +481,87 @@ def list_riassunti():
     return jsonify({'success': True, 'files': files})
 
 
+# ── Streaming ZIP helper ──────────────────────────────────────────────────────
+class _ZipSink:
+    """A write-only, non-seekable sink that buffers bytes for a streaming
+    response. zipfile writes archive bytes here; the response generator drains
+    it chunk by chunk. Because it exposes no tell()/seek(), zipfile falls back
+    to data descriptors and never tries to rewind — so we can emit the archive
+    incrementally instead of holding it all in memory."""
+    def __init__(self):
+        self._buf = bytearray()
+
+    def write(self, data):
+        self._buf.extend(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def drain(self):
+        chunk = bytes(self._buf)
+        self._buf.clear()
+        return chunk
+
+
+def _stream_zip(items, zip_name, window=4):
+    """Stream a ZIP of (arcname, storage_key) pairs to the client.
+
+    Render's free tier caps the whole instance at 512 MB. Building the entire
+    archive in memory (download everything, then copy it all into a BytesIO)
+    peaked at ~2x the payload and OOM-killed the worker on large months —
+    the download then died mid-flight ("Site wasn't available" / Resume).
+
+    Instead we keep only a small sliding WINDOW of files in flight: downloads
+    overlap (so we keep most of the old thread-pool speed), but at most `window`
+    file bodies live in RAM at once, and each is written into the response and
+    freed as soon as the next is ready. Peak memory is bounded regardless of how
+    big the month is.
+
+    ZIP_STORED (no compression): the payload is PDF/XLSX, both already
+    compressed, so deflating only burns CPU for ~no size gain."""
+    items = list(items)
+
+    def generate():
+        sink = _ZipSink()
+        with zipfile.ZipFile(sink, 'w', zipfile.ZIP_STORED) as zf:
+            with ThreadPoolExecutor(max_workers=window) as ex:
+                futures = {}
+                n = len(items)
+                next_submit = 0
+                # Prime the window.
+                while next_submit < n and next_submit < window:
+                    futures[next_submit] = ex.submit(
+                        download_to_bytes, items[next_submit][1])
+                    next_submit += 1
+                for i in range(n):
+                    arcname = items[i][0]
+                    data = futures.pop(i).result()
+                    zf.writestr(arcname, data)
+                    del data
+                    # Refill the window so the next download is already running.
+                    if next_submit < n:
+                        futures[next_submit] = ex.submit(
+                            download_to_bytes, items[next_submit][1])
+                        next_submit += 1
+                    chunk = sink.drain()
+                    if chunk:
+                        yield chunk
+        # Central directory written on ZipFile close.
+        tail = sink.drain()
+        if tail:
+            yield tail
+
+    return Response(generate(), mimetype='application/zip', headers={
+        'Content-Disposition': f'attachment; filename="{zip_name}"',
+    })
+
+
 # ── ZIP all riassunti ─────────────────────────────────────────────────────────
 @app.route('/api/riassunto/zip', methods=['GET'])
 def zip_riassunti():
     storage_prefix = 'Output_Riassunto'
-    # Collect every (arcname, storage_key) pair first, then fetch concurrently.
+    # Collect every (arcname, storage_key) pair, then stream them out.
     keys = []
     for entry in sorted(list_prefix(storage_prefix), key=lambda e: e.get('name', '')):
         if entry.get('id') is not None:
@@ -499,20 +575,7 @@ def zip_riassunti():
             keys.append((os.path.join(period_dir, fname),
                          f'{storage_prefix}/{period_dir}/{fname}'))
 
-    def _fetch(item):
-        arcname, key = item
-        return arcname, download_to_bytes(key)
-
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        results = list(ex.map(_fetch, keys))
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
-        for arcname, file_data in results:
-            zf.writestr(arcname, file_data)
-    buf.seek(0)
-    return send_file(buf, mimetype='application/zip', as_attachment=True,
-                     download_name='Riassunti.zip')
+    return _stream_zip(keys, 'Riassunti.zip')
 
 
 # ── ZIP all rapportini for a period ───────────────────────────────────────────
@@ -532,24 +595,8 @@ def zip_rapportini():
     entries = list_prefix(storage_prefix)
     names = sorted(fe['name'] for fe in entries if fe.get('id') is not None)
 
-    # Fetch files concurrently: each download is an independent network
-    # round-trip to Supabase, so doing them sequentially made the zip take
-    # ~1 minute for a typical month. A thread pool overlaps the waits.
-    def _fetch(fname):
-        return fname, download_to_bytes(f'{storage_prefix}/{fname}')
-
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        results = list(ex.map(_fetch, names))
-
-    buf = io.BytesIO()
-    # ZIP_STORED (no compression): the payload is PDF/XLSX, both already
-    # compressed, so deflating only burns CPU for ~no size gain.
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
-        for fname, file_data in results:
-            zf.writestr(fname, file_data)
-    buf.seek(0)
-    return send_file(buf, mimetype='application/zip', as_attachment=True,
-                     download_name=zip_name)
+    items = [(fname, f'{storage_prefix}/{fname}') for fname in names]
+    return _stream_zip(items, zip_name)
 
 
 # ── Download riassunto file ───────────────────────────────────────────────────
