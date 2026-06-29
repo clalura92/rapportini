@@ -49,7 +49,7 @@ def _run(job):
         cfg.download_fresh_csv(year, month)
         memlog.snapshot('after download_fresh_csv')
     else:
-        cfg.ensure_csv_local(year, month)
+        cfg.ensure_csv_local(year, month, force=job.get('force', False))
         memlog.snapshot('after ensure_csv_local')
 
     if kind == 'projects':

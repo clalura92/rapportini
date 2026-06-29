@@ -51,8 +51,9 @@ async function postStream(path, body, onProgress) {
 const _projectsCache = new Map()
 const _projectsKey = (year, month) => `${year}-${month}`
 
-function _fetchProjects(year, month) {
-  return fetch(`/api/projects?year=${year}&month=${month}`)
+function _fetchProjects(year, month, force = false) {
+  const qs = force ? '&force=1' : ''
+  return fetch(`/api/projects?year=${year}&month=${month}${qs}`)
     .then(r => r.json())
     .then(data => {
       // Don't cache failures, so a transient error can be retried.
@@ -73,7 +74,10 @@ export const api = {
   listProjects:       (year, month, { force = false } = {}) => {
     const key = _projectsKey(year, month)
     if (force) _projectsCache.delete(key)
-    if (!_projectsCache.has(key)) _projectsCache.set(key, _fetchProjects(year, month))
+    // When forcing, also tell the backend to bypass its own in-memory cache and
+    // rebuild from the CSV — otherwise "Ricarica lista" only clears the frontend
+    // copy and the server hands back the same stale list.
+    if (!_projectsCache.has(key)) _projectsCache.set(key, _fetchProjects(year, month, force))
     return _projectsCache.get(key)
   },
   // Fire-and-forget warm-up for a period; safe to call repeatedly.

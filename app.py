@@ -73,16 +73,20 @@ def _get_year_month(data):
 _PROJECTS_CACHE = {}
 
 
-def _build_projects(year, month):
+def _build_projects(year, month, force=False):
     """Build the combined Peve + Fausto project list IN THE SUBPROCESS.
 
     Listing projects parses the CSV with generazione_rapportini_*, which import
     Spire/fitz and load the .NET CLR. Importing those here would pin ~100MB in
     the long-lived web worker forever. Instead we run it as a 'projects' job in
     the short-lived child (which exits and releases everything) and keep only
-    the small JSON list in web memory."""
+    the small JSON list in web memory.
+
+    `force=True` re-pulls the CSV from Supabase before parsing, so a stale local
+    copy on the worker's disk can't keep the list out of date."""
     result = _run_worker_blocking({'kind': 'projects',
-                                   'year': str(year), 'month': str(month)})
+                                   'year': str(year), 'month': str(month),
+                                   'force': force})
     if not result.get('success'):
         raise RuntimeError(result.get('error', 'projects build failed'))
     return (result.get('payload') or {}).get('projects', [])
@@ -367,15 +371,20 @@ def generate_riassunti():
 def list_projects():
     year  = request.args.get('year',  str(datetime.now().year))
     month = request.args.get('month', str(datetime.now().month))
+    force = request.args.get('force') in ('1', 'true', 'yes')
 
-    cached = _PROJECTS_CACHE.get((str(year), str(month)))
-    if cached is not None:
-        return jsonify({'success': True, 'projects': cached})
+    # force=1 (the "Ricarica lista" button) bypasses the in-memory cache and
+    # rebuilds from the CSV — the only way to recover from a stale entry (e.g.
+    # an empty list cached before the month's CSV existed) without a restart.
+    if not force:
+        cached = _PROJECTS_CACHE.get((str(year), str(month)))
+        if cached is not None:
+            return jsonify({'success': True, 'projects': cached})
 
     # Not pre-warmed for this month (e.g. never downloaded in this worker) —
     # build it now as a fallback and store it for next time.
     try:
-        projects = _build_projects(year, month)
+        projects = _build_projects(year, month, force=force)
         _PROJECTS_CACHE[(str(year), str(month))] = projects
         return jsonify({'success': True, 'projects': projects})
     except Exception:

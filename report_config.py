@@ -82,12 +82,16 @@ def download_fresh_csv(year, month):
         year, month, EXPORT_PATH, export_name)
 
 
-def ensure_csv_local(year, month):
-    """Download the Odoo CSV from Supabase if it's not already on local disk."""
+def ensure_csv_local(year, month, force=False):
+    """Download the Odoo CSV from Supabase if it's not already on local disk.
+
+    `force=True` re-downloads even when a local copy exists, so a stale/partial
+    CSV left on disk (e.g. from an interrupted run) is replaced by the
+    authoritative Supabase copy — used by the "Ricarica lista" rebuild."""
     from storage import download_to_bytes
     csv_name = f'{year}_{month}_timesheets_extraction.csv'
     local_csv = EXPORT_PATH + csv_name
-    if not os.path.isfile(local_csv):
+    if force or not os.path.isfile(local_csv):
         try:
             os.makedirs(EXPORT_PATH, exist_ok=True)
             with open(local_csv, 'wb') as f:
