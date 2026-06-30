@@ -22,7 +22,9 @@ export default function ProjectsList({ year, month, fixedType }) {
   const [loading, setLoading]       = useState(false)
   const [loadError, setLoadError]   = useState(null)
   const [rowStatus, setRowStatus]       = useState({})
-  const [genStatus, setGenStatus]       = useState({})
+  // Seed badges from the last-known status (sessionStorage) so the "Stato" column
+  // paints instantly on revisit; the effect below revalidates over the network.
+  const [genStatus, setGenStatus]       = useState(() => api.getCachedStatus(year, month) || {})
   const [filter, setFilter]             = useState('')
   const [typeFilter, setTypeFilter]     = useState(fixedType || '')
   const [selectedProject, setSelectedProject] = useState(null)
@@ -40,12 +42,14 @@ export default function ProjectsList({ year, month, fixedType }) {
   // Refresh which rows already have a generated report in Supabase (drives the
   // "Stato" column). Kept separate from the project list so it can be re-pulled
   // after each generation without rebuilding the list from the CSV.
-  const fetchGenStatus = useCallback(async () => {
+  const fetchGenStatus = useCallback(async ({ force = false } = {}) => {
     try {
-      const data = await api.projectsStatus(localYear, localMonth)
-      setGenStatus(data.success ? (data.status || {}) : {})
+      const data = await api.projectsStatus(localYear, localMonth, { force })
+      // On success update badges; on failure keep whatever we already show
+      // rather than blanking the whole column.
+      if (data.success) setGenStatus(data.status || {})
     } catch {
-      setGenStatus({})
+      /* network error — keep prior badges */
     }
   }, [localYear, localMonth])
 
@@ -57,7 +61,6 @@ export default function ProjectsList({ year, month, fixedType }) {
       if (data.success) {
         setProjects(data.projects)
         setRowStatus({})
-        fetchGenStatus()
       } else {
         setLoadError(data.message || 'Errore nel caricamento progetti')
       }
@@ -66,11 +69,16 @@ export default function ProjectsList({ year, month, fixedType }) {
     } finally {
       setLoading(false)
     }
-  }, [localYear, localMonth, fetchGenStatus])
+  }, [localYear, localMonth])
 
+  // Load the list and the status independently so their latencies overlap
+  // instead of stacking (status no longer waits for the project list to resolve).
+  // Reseed badges from cache first so a period switch paints instantly.
   useEffect(() => {
+    setGenStatus(api.getCachedStatus(localYear, localMonth) || {})
     fetchProjects()
-  }, [fetchProjects])
+    fetchGenStatus()
+  }, [fetchProjects, fetchGenStatus, localYear, localMonth])
 
   function pdfUrl(p) {
     const params = new URLSearchParams({
@@ -319,7 +327,7 @@ export default function ProjectsList({ year, month, fixedType }) {
             Scarica tutti
           </a>
         )}
-        <button className="btn-reload" onClick={() => fetchProjects({ force: true })} disabled={loading}>
+        <button className="btn-reload" onClick={() => { fetchProjects({ force: true }); fetchGenStatus({ force: true }) }} disabled={loading}>
           {loading ? '⟳' : 'Ricarica lista'}
         </button>
       </div>

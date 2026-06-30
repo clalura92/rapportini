@@ -71,6 +71,7 @@ export default function App() {
       // tab reflects the new data.
       if (status === 'success') {
         api.invalidateProjects(year, month)
+        api.invalidateStatus(year, month)  // rows just generated → badges changed
         api.prefetchProjects(year, month)
       }
     } catch (err) {

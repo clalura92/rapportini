@@ -17,7 +17,7 @@ import zipfile
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file, send_from_directory, Response
 
-from storage import download_to_bytes, list_prefix, to_storage_key
+from storage import download_to_bytes, list_prefix, to_storage_key, upload_bytes
 import report_config as cfg
 
 import memlog
@@ -72,33 +72,86 @@ def _get_year_month(data):
 # again right after each download — keyed by (year, month) in memory.
 _PROJECTS_CACHE = {}
 
+# Generated-status of the rows ("Generato"/"Non generato"). Unlike the project
+# list, this changes every time a report is (re)generated, so we cache it in
+# memory keyed by (year, month) and explicitly invalidate after each generation
+# rather than rebuilding it on every Progetti visit (two Supabase list calls).
+_STATUS_CACHE = {}
+
+
+def _invalidate_status(year, month):
+    _STATUS_CACHE.pop((str(year), str(month)), None)
+
+
+# Supabase key for the persisted projects list (see _build_projects). Lives
+# alongside the CSV so a cold/restarted worker can return the list with one fast
+# read instead of re-spawning the subprocess and re-parsing the CSV.
+def _projects_cache_key(year, month):
+    return f'Cache/projects_{year}_{month}.json'
+
+
+def _load_persisted_projects(year, month):
+    """Return the previously-built projects list from Supabase, or None if it's
+    absent/unreadable (then the caller rebuilds from the CSV)."""
+    try:
+        raw = download_to_bytes(_projects_cache_key(year, month))
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _persist_projects(year, month, projects):
+    """Best-effort write of the built list to Supabase; never fatal."""
+    try:
+        upload_bytes(json.dumps(projects, ensure_ascii=False).encode('utf-8'),
+                     _projects_cache_key(year, month))
+    except Exception:
+        pass
+
 
 def _build_projects(year, month, force=False):
-    """Build the combined Peve + Fausto project list IN THE SUBPROCESS.
+    """Build the combined Peve + Fausto project list.
 
-    Listing projects parses the CSV with generazione_rapportini_*, which import
-    Spire/fitz and load the .NET CLR. Importing those here would pin ~100MB in
-    the long-lived web worker forever. Instead we run it as a 'projects' job in
-    the short-lived child (which exits and releases everything) and keep only
-    the small JSON list in web memory.
+    Fast path: read the small JSON we persisted to Supabase after the last build
+    — survives worker restarts (common on Render's free tier), so a cold worker
+    needn't re-spawn the subprocess at all.
 
-    `force=True` re-pulls the CSV from Supabase before parsing, so a stale local
-    copy on the worker's disk can't keep the list out of date."""
+    Slow path: parse the CSV in the subprocess. Listing parses with
+    generazione_rapportini_*, whose import would otherwise pin ~100MB of .NET CLR
+    in the long-lived web worker; running it as a short-lived 'projects' child
+    keeps the web worker light, and we persist the result for next time.
+
+    `force=True` skips the persisted read and re-pulls the CSV from Supabase
+    before parsing, so a stale copy can't keep the list out of date — and the
+    fresh result overwrites the persisted JSON."""
+    if not force:
+        persisted = _load_persisted_projects(year, month)
+        if persisted is not None:
+            return persisted
     result = _run_worker_blocking({'kind': 'projects',
                                    'year': str(year), 'month': str(month),
                                    'force': force})
     if not result.get('success'):
         raise RuntimeError(result.get('error', 'projects build failed'))
-    return (result.get('payload') or {}).get('projects', [])
+    projects = (result.get('payload') or {}).get('projects', [])
+    _persist_projects(year, month, projects)
+    return projects
 
 
 def _warm_projects_cache(year, month):
     """Eagerly (re)build and store the projects list for a month, swallowing
-    errors so a bad/missing CSV never crashes startup or a download."""
+    errors so a bad/missing CSV never crashes startup or a download.
+
+    Called right after a fresh CSV download, so we force a rebuild (force=True)
+    — skipping the persisted read and overwriting the stale JSON with the new
+    list rather than serving the pre-download copy."""
     try:
-        _PROJECTS_CACHE[(str(year), str(month))] = _build_projects(year, month)
+        _PROJECTS_CACHE[(str(year), str(month))] = _build_projects(year, month, force=True)
     except Exception:
         _PROJECTS_CACHE.pop((str(year), str(month)), None)
+    # A fresh CSV can add/remove rows, so the cached status keys may no longer
+    # line up — drop it and let the next status request recompute.
+    _invalidate_status(year, month)
 
 
 # NOTE: we deliberately do NOT warm the cache at boot anymore. Eager warming
@@ -347,7 +400,8 @@ def download():
 def generate_peve():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    return _stream_worker({'kind': 'peve', 'year': year, 'month': month})
+    return _stream_worker({'kind': 'peve', 'year': year, 'month': month},
+                          on_success=lambda _p: _invalidate_status(year, month))
 
 
 # ── Generate Rapportini Fausto ────────────────────────────────────────────────
@@ -355,7 +409,8 @@ def generate_peve():
 def generate_fausto():
     data = request.get_json(silent=True) or {}
     year, month = _get_year_month(data)
-    return _stream_worker({'kind': 'fausto', 'year': year, 'month': month})
+    return _stream_worker({'kind': 'fausto', 'year': year, 'month': month},
+                          on_success=lambda _p: _invalidate_status(year, month))
 
 
 # ── Generate Riassunti ────────────────────────────────────────────────────────
@@ -372,6 +427,16 @@ def list_projects():
     year  = request.args.get('year',  str(datetime.now().year))
     month = request.args.get('month', str(datetime.now().month))
     force = request.args.get('force') in ('1', 'true', 'yes')
+    # include_status=1 attaches the generated-status map so the table can render
+    # rows AND badges from a single round trip (the status endpoint stays for the
+    # post-generation refresh). Reuses the same caches, so it adds no extra work.
+    want_status = request.args.get('include_status') in ('1', 'true', 'yes')
+
+    def _resp(projects):
+        out = {'success': True, 'projects': projects}
+        if want_status:
+            out['status'] = _get_status(year, month, projects, force=force)
+        return jsonify(out)
 
     # force=1 (the "Ricarica lista" button) bypasses the in-memory cache and
     # rebuilds from the CSV — the only way to recover from a stale entry (e.g.
@@ -379,14 +444,16 @@ def list_projects():
     if not force:
         cached = _PROJECTS_CACHE.get((str(year), str(month)))
         if cached is not None:
-            return jsonify({'success': True, 'projects': cached})
+            return _resp(cached)
 
     # Not pre-warmed for this month (e.g. never downloaded in this worker) —
     # build it now as a fallback and store it for next time.
     try:
         projects = _build_projects(year, month, force=force)
         _PROJECTS_CACHE[(str(year), str(month))] = projects
-        return jsonify({'success': True, 'projects': projects})
+        if force:
+            _invalidate_status(year, month)  # rebuilt list → recompute status (below)
+        return _resp(projects)
     except Exception:
         return jsonify({'success': False, 'message': traceback.format_exc()}), 500
 
@@ -444,6 +511,7 @@ def generate_single():
         if res is not None:
             result = res
     if result.get('success'):
+        _invalidate_status(year, month)  # this row's badge must now read "Generato"
         return jsonify({'success': True, **(result.get('payload') or {})})
     return jsonify({'success': False, 'message': result.get('error', 'Errore sconosciuto')}), 500
 
@@ -645,30 +713,23 @@ def _output_prefix(report_type, year, month):
 # UI's "Stato" column reflects which rows actually have a generated report —
 # kept separate from /api/projects because status changes as reports are
 # generated, whereas the (cached) project list only changes on a new CSV.
-@app.route('/api/projects/status', methods=['GET'])
-def projects_status():
-    year  = request.args.get('year',  str(datetime.now().year))
-    month = request.args.get('month', str(datetime.now().month))
+def _list_existing(rtype, year, month):
+    """Set of filenames generated for a type/period in Supabase (empty on error)."""
+    try:
+        entries = list_prefix(_output_prefix(rtype, year, month))
+        return {e['name'] for e in entries if e.get('id') is not None}
+    except Exception:
+        return set()
 
-    # Reuse the same project list the table is built from (build it if this
-    # worker hasn't yet), so the returned keys line up row-for-row.
-    projects = _PROJECTS_CACHE.get((str(year), str(month)))
-    if projects is None:
-        try:
-            projects = _build_projects(year, month)
-            _PROJECTS_CACHE[(str(year), str(month))] = projects
-        except Exception:
-            return jsonify({'success': False, 'message': traceback.format_exc()}), 500
 
-    # List each output folder once, then check membership in memory rather than
-    # one existence call per row.
-    existing = {}
-    for rtype in ('fausto', 'peve'):
-        try:
-            entries = list_prefix(_output_prefix(rtype, year, month))
-            existing[rtype] = {e['name'] for e in entries if e.get('id') is not None}
-        except Exception:
-            existing[rtype] = set()
+def _compute_status(year, month, projects):
+    """Cross-reference the project list against the Supabase output folders and
+    return {row_key -> 'generated'|'missing'}. The two folder listings are
+    independent network round trips, so we run them concurrently."""
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {rtype: ex.submit(_list_existing, rtype, year, month)
+                   for rtype in ('fausto', 'peve')}
+        existing = {rtype: fut.result() for rtype, fut in futures.items()}
 
     status = {}
     for p in projects:
@@ -681,8 +742,38 @@ def projects_status():
                    or f'{basename}.xlsx' in existing.get(rtype, set()))
         key = f"{rtype}:{p['task_category']}:{p['partner_name']}:{p['project_name']}"
         status[key] = 'generated' if present else 'missing'
+    return status
 
-    return jsonify({'success': True, 'status': status})
+
+def _get_status(year, month, projects, force=False):
+    """Status map for the rows, served from _STATUS_CACHE unless `force` (the
+    cache is invalidated on generation, so it can't go stale on its own)."""
+    if not force:
+        cached = _STATUS_CACHE.get((str(year), str(month)))
+        if cached is not None:
+            return cached
+    status = _compute_status(year, month, projects)
+    _STATUS_CACHE[(str(year), str(month))] = status
+    return status
+
+
+@app.route('/api/projects/status', methods=['GET'])
+def projects_status():
+    year  = request.args.get('year',  str(datetime.now().year))
+    month = request.args.get('month', str(datetime.now().month))
+    force = request.args.get('force') in ('1', 'true', 'yes')
+
+    # Reuse the same project list the table is built from (build it if this
+    # worker hasn't yet), so the returned keys line up row-for-row.
+    projects = _PROJECTS_CACHE.get((str(year), str(month)))
+    if projects is None:
+        try:
+            projects = _build_projects(year, month)
+            _PROJECTS_CACHE[(str(year), str(month))] = projects
+        except Exception:
+            return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+
+    return jsonify({'success': True, 'status': _get_status(year, month, projects, force=force)})
 
 
 # ── Download single rapportino (PDF + XLSX zip) ───────────────────────────────

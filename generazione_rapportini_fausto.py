@@ -19,10 +19,11 @@ from openpyxl.drawing.spreadsheet_drawing import AbsoluteAnchor
 from openpyxl.drawing.xdr import XDRPoint2D, XDRPositiveSize2D
 from openpyxl.utils.units import pixels_to_EMU, cm_to_EMU
 
-import spire.xls as spire
-from spire.xls import *
-from spire.xls import ExcelVersion
-import fitz  # PyMuPDF
+# NOTE: Spire.XLS (the embedded .NET CLR, ~100MB) and PyMuPDF (fitz) are imported
+# lazily inside the functions that need them (create_rapportini / _clean_spire_pdf)
+# rather than at module top. Listing projects imports this module but only uses the
+# pure-pandas functions (load_df / list_projects / filter_*), so keeping these heavy
+# imports out of module scope means a `projects` job never loads the .NET runtime.
 import re
 import os
 from os import listdir
@@ -252,9 +253,10 @@ _SPIRE_WARN_RE = re.compile(
 )
 
 _LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates', 'logo_solware.png')
-_LOGO_RECT = fitz.Rect(620, 77, 673, 117)
+_LOGO_RECT_COORDS = (620, 77, 673, 117)  # built into a fitz.Rect lazily in _clean_spire_pdf
 
 def _clean_spire_pdf(pdf_path):
+    import fitz  # PyMuPDF — heavy; imported here so listing never loads it
     tmp_path = pdf_path + '.tmp'
     doc = fitz.open(pdf_path)
     if doc.page_count > 1:
@@ -271,7 +273,7 @@ def _clean_spire_pdf(pdf_path):
             if modified != raw:
                 doc.update_stream(xref, modified)
         if os.path.exists(_LOGO_PATH):
-            page.insert_image(_LOGO_RECT, filename=_LOGO_PATH, keep_proportion=True)
+            page.insert_image(fitz.Rect(*_LOGO_RECT_COORDS), filename=_LOGO_PATH, keep_proportion=True)
     doc.save(tmp_path, garbage=4, deflate=True)
     doc.close()
     del doc
@@ -305,7 +307,7 @@ def list_projects(path_source, year, month, eligibility_rules, to_isolate_list, 
 
 
 def create_rapportini(path_source, path_output, year, month, filtered_partners, eligibility_rules, to_isolate_list, dict_partner_rename, tasks, only_task=None, only_partner=None, only_project=None):
-
+    import spire.xls as spire  # heavy .NET CLR; imported here so listing never loads it
     year = int(year)
     month = int(month)
 

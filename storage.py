@@ -52,6 +52,22 @@ def upload_file(local_path: str, storage_key: str) -> None:
         bucket.upload(storage_key, data)
 
 
+def upload_bytes(data: bytes, storage_key: str) -> None:
+    """Upload an in-memory blob to Supabase Storage, overwriting if it exists.
+    Used for small derived artifacts (e.g. the cached projects-list JSON) that
+    never touch local disk."""
+    sb = _client()
+    bucket = sb.storage.from_(_bucket())
+    try:
+        bucket.upload(storage_key, data, {'upsert': 'true'})
+    except Exception:
+        try:
+            bucket.remove([storage_key])
+        except Exception:
+            pass
+        bucket.upload(storage_key, data)
+
+
 def upload_and_remove(local_path: str, storage_key: str) -> None:
     """Upload a file to Supabase, then delete the local copy.
 

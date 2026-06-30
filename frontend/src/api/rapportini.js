@@ -51,6 +51,24 @@ async function postStream(path, body, onProgress) {
 const _projectsCache = new Map()
 const _projectsKey = (year, month) => `${year}-${month}`
 
+// Generated-status cache, persisted in sessionStorage so the "Stato" badges show
+// instantly when you revisit the Progetti tab (instead of blanking until the
+// network call returns). The server invalidates its own status cache on every
+// generation, so we always revalidate in the background and treat the response
+// as the source of truth — the stored copy is purely for an instant first paint.
+const _statusStorageKey = (year, month) => `genstatus-${year}-${month}`
+
+function getCachedStatus(year, month) {
+  try {
+    const raw = sessionStorage.getItem(_statusStorageKey(year, month))
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function _setCachedStatus(year, month, status) {
+  try { sessionStorage.setItem(_statusStorageKey(year, month), JSON.stringify(status)) } catch { /* quota / private mode */ }
+}
+
 function _fetchProjects(year, month, force = false) {
   const qs = force ? '&force=1' : ''
   return fetch(`/api/projects?year=${year}&month=${month}${qs}`)
@@ -82,11 +100,22 @@ export const api = {
   },
   // Fire-and-forget warm-up for a period; safe to call repeatedly.
   prefetchProjects:   (year, month) => { api.listProjects(year, month).catch(() => {}) },
-  // Which project rows actually have a generated report in Supabase. Not cached:
-  // status changes every time a report is (re)generated.
-  projectsStatus:     (year, month) =>
-                        fetch(`/api/projects/status?year=${year}&month=${month}`).then(r => r.json()),
+  // Which project rows actually have a generated report in Supabase. Revalidates
+  // over the network and writes through to the sessionStorage cache; pass
+  // { force: true } to also bypass the server's status cache ("Ricarica lista").
+  projectsStatus:     (year, month, { force = false } = {}) => {
+    const qs = force ? '&force=1' : ''
+    return fetch(`/api/projects/status?year=${year}&month=${month}${qs}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.success) _setCachedStatus(year, month, data.status || {})
+        return data
+      })
+  },
+  // Synchronous read of the last-known status for instant badge paint on revisit.
+  getCachedStatus,
   invalidateProjects: (year, month) => _projectsCache.delete(_projectsKey(year, month)),
+  invalidateStatus:   (year, month) => { try { sessionStorage.removeItem(_statusStorageKey(year, month)) } catch { /* ignore */ } },
   listRiassunti:      ()            => fetch('/api/list/riassunti').then(r => r.json()),
   generateSingle:     (year, month, reportType, taskCategory, partnerName, projectName) =>
                         post('/generate/single', {
