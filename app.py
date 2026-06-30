@@ -617,6 +617,74 @@ def download_riassunto():
     return send_file(io.BytesIO(data), mimetype=mime, as_attachment=True, download_name=filename)
 
 
+def _report_basename(year, month, task_category, partner_name, project_name):
+    """Reconstruct the filename (without extension) that generation writes for a
+    given report row. Generation names files
+    `{year}-{month} _{TASK}_{first word of partner}[ - {project}]` (see
+    generazione_rapportini_*.create_rapportini), so the preview, single-zip
+    download and generated-status check all resolve the same key from here."""
+    proj = project_name or ''
+    sep  = ' - ' if proj else ''
+    return (f'{year}-{month} _' + (task_category or '').upper() + '_'
+            + re.split(r'[ ]', partner_name or '')[0] + sep + proj)
+
+
+def _output_prefix(report_type, year, month):
+    """Supabase prefix holding generated reports for a type/period, or None for
+    an unknown type."""
+    if report_type == 'peve':
+        return f'Output_Rapportini_Peve/{year}_{month}'
+    if report_type == 'fausto':
+        return f'Output_Rapportini_Fausto/{year}_{month}'
+    return None
+
+
+# ── Generated-status of the project rows ──────────────────────────────────────
+# The project list comes from the Odoo timesheet CSV (i.e. what *could* be
+# generated). This endpoint cross-references the Supabase output folders so the
+# UI's "Stato" column reflects which rows actually have a generated report —
+# kept separate from /api/projects because status changes as reports are
+# generated, whereas the (cached) project list only changes on a new CSV.
+@app.route('/api/projects/status', methods=['GET'])
+def projects_status():
+    year  = request.args.get('year',  str(datetime.now().year))
+    month = request.args.get('month', str(datetime.now().month))
+
+    # Reuse the same project list the table is built from (build it if this
+    # worker hasn't yet), so the returned keys line up row-for-row.
+    projects = _PROJECTS_CACHE.get((str(year), str(month)))
+    if projects is None:
+        try:
+            projects = _build_projects(year, month)
+            _PROJECTS_CACHE[(str(year), str(month))] = projects
+        except Exception:
+            return jsonify({'success': False, 'message': traceback.format_exc()}), 500
+
+    # List each output folder once, then check membership in memory rather than
+    # one existence call per row.
+    existing = {}
+    for rtype in ('fausto', 'peve'):
+        try:
+            entries = list_prefix(_output_prefix(rtype, year, month))
+            existing[rtype] = {e['name'] for e in entries if e.get('id') is not None}
+        except Exception:
+            existing[rtype] = set()
+
+    status = {}
+    for p in projects:
+        rtype    = p['report_type']
+        basename = _report_basename(year, month, p['task_category'],
+                                    p['partner_name'], p['project_name'])
+        # A report exists if either artifact is present: the .xlsx is always
+        # written, while Spire PDF conversion can fail independently.
+        present = (f'{basename}.pdf'  in existing.get(rtype, set())
+                   or f'{basename}.xlsx' in existing.get(rtype, set()))
+        key = f"{rtype}:{p['task_category']}:{p['partner_name']}:{p['project_name']}"
+        status[key] = 'generated' if present else 'missing'
+
+    return jsonify({'success': True, 'status': status})
+
+
 # ── Download single rapportino (PDF + XLSX zip) ───────────────────────────────
 @app.route('/api/rapportini/single/zip', methods=['GET'])
 def zip_single_rapportino():
@@ -627,17 +695,11 @@ def zip_single_rapportino():
     partner_name  = request.args.get('partner_name', '')
     project_name  = request.args.get('project_name', '')
 
-    if report_type == 'peve':
-        storage_prefix = f'Output_Rapportini_Peve/{year}_{month}'
-    elif report_type == 'fausto':
-        storage_prefix = f'Output_Rapportini_Fausto/{year}_{month}'
-    else:
+    storage_prefix = _output_prefix(report_type, year, month)
+    if storage_prefix is None:
         return jsonify({'success': False, 'message': f'Tipo sconosciuto: {report_type}'}), 400
 
-    _proj    = project_name if project_name else ''
-    _sep     = ' - ' if _proj else ''
-    basename = (f'{year}-{month} _' + task_category.upper() + '_'
-                + re.split(r'[ ]', partner_name)[0] + _sep + _proj)
+    basename = _report_basename(year, month, task_category, partner_name, project_name)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -663,19 +725,12 @@ def serve_pdf():
     partner_name  = request.args.get('partner_name', '')
     project_name  = request.args.get('project_name', '')
 
-    if report_type == 'peve':
-        storage_prefix = f'Output_Rapportini_Peve/{year}_{month}'
-        local_root     = OUTPUT_PEVE
-    elif report_type == 'fausto':
-        storage_prefix = f'Output_Rapportini_Fausto/{year}_{month}'
-        local_root     = OUTPUT_FAUSTO
-    else:
+    storage_prefix = _output_prefix(report_type, year, month)
+    if storage_prefix is None:
         return jsonify({'success': False, 'message': f'Tipo sconosciuto: {report_type}'}), 400
+    local_root = OUTPUT_PEVE if report_type == 'peve' else OUTPUT_FAUSTO
 
-    _proj    = project_name if project_name else ''
-    _sep     = ' - ' if _proj else ''
-    filename = (f'{year}-{month} _' + task_category.upper() + '_'
-                + re.split(r'[ ]', partner_name)[0] + _sep + _proj + '.pdf')
+    filename = _report_basename(year, month, task_category, partner_name, project_name) + '.pdf'
     storage_key = f'{storage_prefix}/{filename}'
     # regenerate_pdf() writes the fresh PDF to this local path synchronously, so
     # prefer it over Supabase: the Supabase CDN can serve a stale copy for a few

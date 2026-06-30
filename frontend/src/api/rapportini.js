@@ -82,6 +82,10 @@ export const api = {
   },
   // Fire-and-forget warm-up for a period; safe to call repeatedly.
   prefetchProjects:   (year, month) => { api.listProjects(year, month).catch(() => {}) },
+  // Which project rows actually have a generated report in Supabase. Not cached:
+  // status changes every time a report is (re)generated.
+  projectsStatus:     (year, month) =>
+                        fetch(`/api/projects/status?year=${year}&month=${month}`).then(r => r.json()),
   invalidateProjects: (year, month) => _projectsCache.delete(_projectsKey(year, month)),
   listRiassunti:      ()            => fetch('/api/list/riassunti').then(r => r.json()),
   generateSingle:     (year, month, reportType, taskCategory, partnerName, projectName) =>

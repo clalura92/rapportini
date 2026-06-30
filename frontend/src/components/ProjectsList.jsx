@@ -22,6 +22,7 @@ export default function ProjectsList({ year, month, fixedType }) {
   const [loading, setLoading]       = useState(false)
   const [loadError, setLoadError]   = useState(null)
   const [rowStatus, setRowStatus]       = useState({})
+  const [genStatus, setGenStatus]       = useState({})
   const [filter, setFilter]             = useState('')
   const [typeFilter, setTypeFilter]     = useState(fixedType || '')
   const [selectedProject, setSelectedProject] = useState(null)
@@ -36,6 +37,18 @@ export default function ProjectsList({ year, month, fixedType }) {
   const [hasModifications, setHasModifications] = useState(false)
   const chatBottomRef = useRef(null)
 
+  // Refresh which rows already have a generated report in Supabase (drives the
+  // "Stato" column). Kept separate from the project list so it can be re-pulled
+  // after each generation without rebuilding the list from the CSV.
+  const fetchGenStatus = useCallback(async () => {
+    try {
+      const data = await api.projectsStatus(localYear, localMonth)
+      setGenStatus(data.success ? (data.status || {}) : {})
+    } catch {
+      setGenStatus({})
+    }
+  }, [localYear, localMonth])
+
   const fetchProjects = useCallback(async ({ force = false } = {}) => {
     setLoading(true)
     setLoadError(null)
@@ -44,6 +57,7 @@ export default function ProjectsList({ year, month, fixedType }) {
       if (data.success) {
         setProjects(data.projects)
         setRowStatus({})
+        fetchGenStatus()
       } else {
         setLoadError(data.message || 'Errore nel caricamento progetti')
       }
@@ -52,7 +66,7 @@ export default function ProjectsList({ year, month, fixedType }) {
     } finally {
       setLoading(false)
     }
-  }, [localYear, localMonth])
+  }, [localYear, localMonth, fetchGenStatus])
 
   useEffect(() => {
     fetchProjects()
@@ -138,6 +152,7 @@ export default function ProjectsList({ year, month, fixedType }) {
         project.project_name,
       )
       setRowStatus(prev => ({ ...prev, [key]: data.success ? 'success' : 'error' }))
+      if (data.success) fetchGenStatus()
     } catch (err) {
       setRowStatus(prev => ({ ...prev, [key]: 'error' }))
     }
@@ -343,9 +358,15 @@ export default function ProjectsList({ year, month, fixedType }) {
                     <td>{p.partner_name}</td>
                     <td className="col-project">{p.project_name || '—'}</td>
                     <td>
-                      {status === 'running' && <span className="badge badge--running">⟳ In corso…</span>}
-                      {status === 'success' && <span className="badge badge--success">✓ Aggiornato</span>}
-                      {status === 'error'   && <span className="badge badge--error">✕ Errore</span>}
+                      {status === 'running'
+                        ? <span className="badge badge--running">⟳ In corso…</span>
+                        : status === 'error'
+                        ? <span className="badge badge--error">✕ Errore</span>
+                        : genStatus[key] === 'generated'
+                        ? <span className="badge badge--success">✓ Generato</span>
+                        : genStatus[key] === 'missing'
+                        ? <span className="badge badge--muted">Non generato</span>
+                        : null}
                     </td>
                     <td>
                       <div className="riassunti-actions">

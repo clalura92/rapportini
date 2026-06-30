@@ -686,6 +686,7 @@ body {
 .badge--running { background: #e0f2f1; color: #00796b; }
 .badge--success { background: #e8f5e9; color: #2e7d32; }
 .badge--error   { background: #fce4ec; color: #c62828; }
+.badge--muted   { background: #eceff1; color: #78909c; }
 
 /* ── Per-row update button ───────────────────────────────────────────────── */
 .btn-update {
